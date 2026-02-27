@@ -1,0 +1,13 @@
+# Build output
+build/
+*.o
+*.a
+*.out
+benchmark/
+
+# Dataset — do not commit (assignment says "do not include test data")
+*.csv
+*.csv.
+
+# macOS
+.DS_Store
