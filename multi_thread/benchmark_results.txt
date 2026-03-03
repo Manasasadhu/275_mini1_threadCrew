@@ -1,0 +1,6 @@
+Multi-Thread Benchmark — Tue Mar  3 09:56:31 PST 2026
+Dataset: /Users/bhuvana/Desktop/CMPE275/mini1/311_combined.csv
+Logical CPUs: 10
+========================================================
+
+=== Threads: 4 ===
