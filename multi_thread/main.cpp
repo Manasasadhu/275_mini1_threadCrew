@@ -304,8 +304,8 @@ std::vector<const ServiceRequest*> filterByLatLonBox(double minLat, double maxLa
         out.insert(out.end(), localResults[t].begin(), localResults[t].end());
     return out;
 }
-
-// 5. Sort by createdDate (Sequential Sort)
+/*
+//5. Sort by createdDate (Sequential Sort)
 // Note: std::sort is used here on a copy of the data. 
 // A full parallel sort (e.g. __gnu_parallel::sort) could be used if available.
 std::vector<ServiceRequest> sortByCreatedDate(int numberOfThreads) {
@@ -320,7 +320,7 @@ std::vector<ServiceRequest> sortByCreatedDate(int numberOfThreads) {
 
     return recs;
 }
-
+*/
 // 6. Average latitude (OpenMP reduction)
 // Calculates the sum of latitudes using parallel reduction.
 double averageLatitude(int numberOfThreads) {
