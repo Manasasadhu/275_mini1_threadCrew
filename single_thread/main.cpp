@@ -6,6 +6,8 @@
 #include <chrono>
 #include <mach/mach.h>
 #include <algorithm> 
+#include <map>
+#include <cmath>
 
 // cleanString — strips surrounding double-quotes if present
 std::string cleanString(const std::string& str) {
@@ -197,10 +199,57 @@ double averageLatitude() {
     return sum / g_records.size();
 }
 
+// ---------------------------------------------------------------------------
+// 7. Aggregation: Borough totals + top complaint (SERIAL)
+// ---------------------------------------------------------------------------
+struct ZoneStats {
+    std::size_t totalCount = 0;
+    std::map<std::string, std::size_t> byComplaintType;
+};
+
+std::map<std::string, ZoneStats> aggregateByBorough() {
+    std::map<std::string, ZoneStats> result;
+
+    for (const auto& r : g_records) {
+        const std::string key = r.borough.empty() ? "(unknown)" : r.borough;
+        ZoneStats& z = result[key];
+        z.totalCount++;
+
+        if (!r.complaintType.empty())
+            z.byComplaintType[r.complaintType]++;
+    }
+
+    return result;
+}
+
+template<typename MapT>
+void printTopZones(const MapT& zones) {
+    for (const auto& kv : zones) {
+        const auto& borough = kv.first;
+        const auto& z = kv.second;
+
+        std::string topComplaint = "(none)";
+        std::size_t topCount = 0;
+
+        for (const auto& c : z.byComplaintType) {
+            if (c.second > topCount) {
+                topCount = c.second;
+                topComplaint = c.first;
+            }
+        }
+
+        std::cout << borough
+                  << " total=" << z.totalCount
+                  << " top_complaint=\"" << topComplaint << "\""
+                  << " (" << topCount << ")"
+                  << "\n";
+    }
+}
+
 // Takes all 20 million records and groups them by zip code, building a summary (total complaints, breakdown by type/agency/status) for each unique zip code found in the dataset.
 
 int main() {
-    const std::string filename = "/Users/aravindreddy/Downloads/SJSU ClassWork/275 EAD/Mini1_Datasets/311_combined.csv.";
+    const std::string filename = "/Users/Asha/Desktop/Asha workspace/275-mini1/dataset/311_combined.csv";
 
     double memBefore = rssMemMB();
     std::cout << "Memory before load: " << memBefore << " MB" << std::endl;
@@ -275,19 +324,31 @@ int main() {
 
     // complaint substring
     measureVectorQuery("complaint 'rodent'", runs,
-                       [&](){ return searchByComplaint("rodent"); });
+                      [&](){ return searchByComplaint("rodent"); });
 
     // sort query 
     // complaint substring
-    measureVectorQuery("sorted date", runs,
-                       [&](){ return sortByCreatedDate(); });
+    //measureVectorQuery("sorted date", runs,
+         //            [&](){ return sortByCreatedDate(); });
 
     // lat/lon box example (rough NYC box)
-    measureVectorQuery("lat/lon box", runs,
-                       [&](){ return filterByLatLonBox(40.5, 40.9, -74.25, -73.7); });
+   measureVectorQuery("lat/lon box", runs,
+                      [&](){ return filterByLatLonBox(40.5, 40.9, -74.25, -73.7); });
 
     // average latitude
-    measureScalarQuery("average latitude", runs, [](){ return averageLatitude(); });
+   measureScalarQuery("average latitude", runs, [](){ return averageLatitude(); });
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto result = aggregateByBorough();
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> duration = t1 - t0;
+
+    std::cout << "\nBorough aggregation (serial) took "
+              << duration.count() << " seconds\n";
+
+    std::cout << "\n=== Borough Totals + Top Complaint ===\n";
+    printTopZones(result);
 
     return 0;
 }
