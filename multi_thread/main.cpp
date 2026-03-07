@@ -9,6 +9,10 @@
 #include <cstring>
 #include <omp.h>
 #include <mach/mach.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 // Global dataset — filled once during loading, read-only during queries
 static std::vector<ServiceRequest> g_records;
@@ -255,7 +259,7 @@ std::vector<ServiceRequest> filterByBorough(const std::string& borough,
         out.insert(out.end(), localResults[t].begin(), localResults[t].end());
     return out;
 }
-
+/*
 // 3. Complaint substring search (case-insensitive)
 std::vector<ServiceRequest> searchByComplaint(const std::string& keyword,
                                               int numberOfThreads) {
@@ -304,7 +308,7 @@ std::vector<const ServiceRequest*> filterByLatLonBox(double minLat, double maxLa
         out.insert(out.end(), localResults[t].begin(), localResults[t].end());
     return out;
 }
-/*
+
 //5. Sort by createdDate (Sequential Sort)
 // Note: std::sort is used here on a copy of the data. 
 // A full parallel sort (e.g. __gnu_parallel::sort) could be used if available.
@@ -320,7 +324,7 @@ std::vector<ServiceRequest> sortByCreatedDate(int numberOfThreads) {
 
     return recs;
 }
-*/
+
 // 6. Average latitude (OpenMP reduction)
 // Calculates the sum of latitudes using parallel reduction.
 double averageLatitude(int numberOfThreads) {
@@ -338,7 +342,7 @@ double averageLatitude(int numberOfThreads) {
 
     return sum / g_records.size();
 }
-
+*/
 // ---------------------------------------------------------------------------
 // main() — benchmark harness
 // ---------------------------------------------------------------------------
@@ -429,21 +433,11 @@ int main(int argc, char* argv[]) {
     measureVectorQuery("borough BROOKLYN", runs,
         [&]() { return filterByBorough("BROOKLYN", numberOfThreads); });
 
-    // Complaint "rodent"
-    measureVectorQuery("complaint 'rodent'", runs,
-        [&]() { return searchByComplaint("rodent", numberOfThreads); });
-
-    // Sort by date
-    measureVectorQuery("sorted date", runs,
-        [&]() { return sortByCreatedDate(numberOfThreads); });
-
-    // Lat/lon box (NYC)
-    measureVectorQuery("lat/lon box", runs,
-        [&]() { return filterByLatLonBox(40.5, 40.9, -74.25, -73.7, numberOfThreads); });
-
-    // Average latitude
-    measureScalarQuery("average latitude", runs,
-        [&]() { return averageLatitude(numberOfThreads); });
+    // Queries 3-6 disabled for this run
+    // measureVectorQuery("complaint 'rodent'", runs, [&]() { return searchByComplaint("rodent", numberOfThreads); });
+    // measureVectorQuery("sorted date", runs, [&]() { return sortByCreatedDate(numberOfThreads); });
+    // measureVectorQuery("lat/lon box", runs, [&]() { return filterByLatLonBox(40.5, 40.9, -74.25, -73.7, numberOfThreads); });
+    // measureScalarQuery("average latitude", runs, [&]() { return averageLatitude(numberOfThreads); });
 
     return 0;
 }

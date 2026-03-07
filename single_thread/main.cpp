@@ -83,8 +83,6 @@ std::vector<ServiceRequest> loadData(const std::string& filename) {
     std::string line;
     std::size_t lineCount = 0;
     std::size_t validRecords = 0;
-    const std::size_t RECORD_LIMIT = 14000000; // 10 Million record limit for testing; adjust as needed
-
     // Skip header
     if (std::getline(file, line)) {
         lineCount++;
@@ -103,10 +101,6 @@ std::vector<ServiceRequest> loadData(const std::string& filename) {
         if (req.fromFields(fields)) {
             records.push_back(std::move(req));
             validRecords++;
-            if (validRecords >= RECORD_LIMIT) {
-                std::cout << "Reached limit of " << RECORD_LIMIT << " records, stopping load." << std::endl;
-                break;
-            }
         } else {
             std::cerr << "Malformed record at line " << lineCount << std::endl;
         }
@@ -150,7 +144,7 @@ std::vector<ServiceRequest> filterByBorough(const std::string& borough) {
     }
     return out;
 }
-
+/*
 // 3. substring search on complaintType (case-insensitive)
 std::vector<ServiceRequest> searchByComplaint(const std::string& keyword) {
     std::vector<ServiceRequest> out;
@@ -221,7 +215,7 @@ std::map<std::string, ZoneStats> aggregateByBorough() {
 
     return result;
 }
-
+*/
 template<typename MapT>
 void printTopZones(const MapT& zones) {
     for (const auto& kv : zones) {
@@ -249,7 +243,7 @@ void printTopZones(const MapT& zones) {
 // Takes all 20 million records and groups them by zip code, building a summary (total complaints, breakdown by type/agency/status) for each unique zip code found in the dataset.
 
 int main() {
-    const std::string filename = "/Users/Asha/Desktop/Asha workspace/275-mini1/dataset/311_combined.csv";
+    const std::string filename = "/Users/bhuvana/Desktop/CMPE275/mini1/311_combined.csv";
 
     double memBefore = rssMemMB();
     std::cout << "Memory before load: " << memBefore << " MB" << std::endl;
@@ -321,34 +315,6 @@ int main() {
     // borough filter
     measureVectorQuery("borough BROOKLYN", runs,
                        [&](){ return filterByBorough("BROOKLYN"); });
-
-    // complaint substring
-    measureVectorQuery("complaint 'rodent'", runs,
-                      [&](){ return searchByComplaint("rodent"); });
-
-    // sort query 
-    // complaint substring
-    //measureVectorQuery("sorted date", runs,
-         //            [&](){ return sortByCreatedDate(); });
-
-    // lat/lon box example (rough NYC box)
-   measureVectorQuery("lat/lon box", runs,
-                      [&](){ return filterByLatLonBox(40.5, 40.9, -74.25, -73.7); });
-
-    // average latitude
-   measureScalarQuery("average latitude", runs, [](){ return averageLatitude(); });
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = aggregateByBorough();
-    auto t1 = std::chrono::high_resolution_clock::now();
-
-    std::chrono::duration<double> duration = t1 - t0;
-
-    std::cout << "\nBorough aggregation (serial) took "
-              << duration.count() << " seconds\n";
-
-    std::cout << "\n=== Borough Totals + Top Complaint ===\n";
-    printTopZones(result);
 
     return 0;
 }

@@ -1,0 +1,22 @@
+Thread count: 4
+Memory before load: 1.4375 MB
+Loading NYC 311 data from: /Users/bhuvana/Desktop/CMPE275/mini1/311_combined.csv
+  Chunk 0: bytes [718, 2972162501) size=2972161783
+  Chunk 1: bytes [2972162501, 5944323642) size=2972161141
+  Chunk 2: bytes [5944323642, 8916484709) size=2972161067
+  Chunk 3: bytes [8916484709, 11888645924) size=2972161215
+Loaded 19618017 records in 273.842 seconds
+Total lines processed: 19618019
+Memory after load: 2.26562 MB
+Memory delta: 0.828125 MB
+
+=== Sample Records ===
+#1: 26402538 | 2013-09-29 00:00:00 | BROOKLYN | Rodent
+#2: 26405585 | 2013-09-30 12:48:21 | BROOKLYN | New Tree Request
+#3: 26410194 | 2013-09-30 12:25:00 | MANHATTAN | Dirty Conditions
+#4: 38421385 | 2018-02-08 11:06:00 | STATEN ISLAND | Electronics Waste
+#5: 26398569 | 2013-09-28 00:00:00 | BRONX | PLUMBING
+
+=== Query Outputs ===
+date range 2013 -> size=484799, total=128.766s, avg=8.58441s
+borough BROOKLYN -> size=5649191, total=2495.44s, avg=166.363s
