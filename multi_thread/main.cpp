@@ -9,10 +9,6 @@
 #include <cstring>
 #include <omp.h>
 #include <mach/mach.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 // Global dataset — filled once during loading, read-only during queries
 static std::vector<ServiceRequest> g_records;
@@ -84,181 +80,141 @@ static double rssMemMB() {
 // Parallel CSV loader using std::thread
 // Loads data by splitting the file into chunks and processing them in parallel.
 // ---------------------------------------------------------------------------
-std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
-                                              int numberOfThreads) {
-    if (numberOfThreads <= 0) numberOfThreads = 1;
+// ---------------------------------------------------------------------------
+// Sequential CSV loader — same logic as single_thread/main.cpp.
+// Parallelism is only applied to the query functions, not loading.
+// ---------------------------------------------------------------------------
+std::vector<ServiceRequest> loadData(const std::string& filename) {
+    auto start = std::chrono::high_resolution_clock::now();
 
-    auto wallStart = std::chrono::high_resolution_clock::now();
     std::cout << "Loading NYC 311 data from: " << filename << std::endl;
 
-    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    std::ifstream file(filename);
     if (!file.is_open()) {
         std::cerr << "Error opening file: " << filename << std::endl;
         return {};
     }
 
-    // Read entire file into a memory buffer for fast access
-    auto fileSize = file.tellg();
-    file.seekg(0, std::ios::beg);
-    std::string buffer(static_cast<std::size_t>(fileSize), '\0');
-    file.read(&buffer[0], fileSize);
-    file.close();
+    std::vector<ServiceRequest> records;
+    std::string line;
+    std::size_t lineCount = 0;
+    std::size_t validRecords = 0;
 
-    // Find end of header line to skip it
-    std::size_t headerEnd = buffer.find('\n');
-    if (headerEnd == std::string::npos) {
-        std::cout << "File is empty or has only a header. 0 records loaded." << std::endl;
-        return {};
-    }
-    std::size_t dataStart = headerEnd + 1;
-
-    // Divide the file content into equal chunks for each thread
-    std::size_t dataLen = buffer.size() - dataStart;
-    std::size_t chunkSize = dataLen / numberOfThreads;
-
-    std::vector<std::size_t> chunkStarts(numberOfThreads);
-    std::vector<std::size_t> chunkEnds(numberOfThreads);
-
-    chunkStarts[0] = dataStart;
-    for (int t = 1; t < numberOfThreads; ++t) {
-        std::size_t pos = dataStart + t * chunkSize;
-        // Adjust split position: scan forward to next newline to ensure we don't split a line in the middle
-        while (pos < buffer.size() && buffer[pos] != '\n') ++pos;
-        if (pos < buffer.size()) ++pos; // move past the newline
-        chunkStarts[t] = pos;
-        chunkEnds[t - 1] = pos;
-    }
-    chunkEnds[numberOfThreads - 1] = buffer.size();
-
-    // Print chunk info for debugging/verification
-    for (int t = 0; t < numberOfThreads; ++t) {
-        std::cout << "  Chunk " << t << ": bytes ["
-                  << chunkStarts[t] << ", " << chunkEnds[t] << ")"
-                  << " size=" << (chunkEnds[t] - chunkStarts[t]) << std::endl;
+    // Skip header
+    if (std::getline(file, line)) {
+        lineCount++;
+        std::cout << "Skipped header: " << line.substr(0, 100) << "..." << std::endl;
     }
 
-    // Per-thread local storage to avoid locking/contention on a shared vector
-    std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
-    std::vector<std::size_t> localLineCount(numberOfThreads, 0);
+    // Read data lines — one at a time, no parallel loading
+    while (std::getline(file, line)) {
+        lineCount++;
+        if (lineCount % 100000 == 0) {
+            std::cout << "Processed " << lineCount << " lines, loaded " << validRecords << " records..." << std::endl;
+        }
 
-    // Spawn threads to process each chunk independently
-    std::vector<std::thread> threads;
-    for (int t = 0; t < numberOfThreads; ++t) {
-        threads.emplace_back([&, t]() {
-            std::size_t start = chunkStarts[t];
-            std::size_t end   = chunkEnds[t];
-            std::string line;
-            line.reserve(2048);
-
-            for (std::size_t pos = start; pos < end; ) {
-                // Extract one line from the buffer
-                line.clear();
-                while (pos < end && buffer[pos] != '\n') {
-                    if (buffer[pos] != '\r')
-                        line += buffer[pos];
-                    ++pos;
-                }
-                if (pos < end) ++pos; // skip newline
-
-                if (line.empty()) continue;
-                localLineCount[t]++;
-
-                // Parse the line and create a ServiceRequest object
-                auto fields = parseCSVLine(line);
-                ServiceRequest req;
-                if (req.fromFields(fields)) {
-                    localResults[t].push_back(std::move(req));
-                }
-            }
-        });
+        std::vector<std::string> fields = parseCSVLine(line);
+        ServiceRequest req;
+        if (req.fromFields(fields)) {
+            records.push_back(std::move(req));
+            validRecords++;
+        } else {
+            std::cerr << "Malformed record at line " << lineCount << std::endl;
+        }
     }
 
-    // Wait for all threads to complete
-    for (auto& th : threads) th.join();
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = end - start;
 
-    // Merge thread-local results into the final result vector
-    std::size_t totalLines = 1; // count header
-    std::size_t totalValid = 0;
-    for (int t = 0; t < numberOfThreads; ++t) {
-        totalLines += localLineCount[t];
-        totalValid += localResults[t].size();
+    std::cout << "Loaded " << validRecords << " records in " << duration.count() << " seconds" << std::endl;
+    std::cout << "Total lines processed: " << lineCount << std::endl;
+
+    return records;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: case-insensitive string equality without allocating a temp string.
+// Compares character-by-character, converting to uppercase on the fly.
+// ---------------------------------------------------------------------------
+static bool equalsIgnoreCase(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (std::toupper(static_cast<unsigned char>(a[i])) !=
+            std::toupper(static_cast<unsigned char>(b[i])))
+            return false;
     }
-
-    std::vector<ServiceRequest> result;
-    result.reserve(totalValid);
-    for (int t = 0; t < numberOfThreads; ++t) {
-        result.insert(result.end(),
-                      std::make_move_iterator(localResults[t].begin()),
-                      std::make_move_iterator(localResults[t].end()));
-    }
-
-    auto wallEnd = std::chrono::high_resolution_clock::now();
-    double elapsed = std::chrono::duration<double>(wallEnd - wallStart).count();
-
-    std::cout << "Loaded " << totalValid << " records in "
-              << elapsed << " seconds" << std::endl;
-    std::cout << "Total lines processed: " << totalLines << std::endl;
-
-    return result;
+    return true;
 }
 
 // ---------------------------------------------------------------------------
 // Parallel query functions (OpenMP)
-// These functions use OpenMP for data parallelism.
+//
+// Key optimizations vs the naive version:
+//   1. Store indices instead of copying full ServiceRequest objects.
+//      Each record has ~20 std::string fields — copying millions of them
+//      hammers the heap allocator which serializes across threads.
+//   2. Case-insensitive comparisons done in-place (no temp string alloc).
+//   3. Pre-reserve thread-local vectors to reduce reallocation.
+//   4. Single pass to build the final result from indices.
 // ---------------------------------------------------------------------------
 
-// 1. Date range filter
-// Uses OpenMP to iterate over the global dataset in parallel chunks.
+// 1. Date range filter — returns indices, builds result vector at the end
 std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
                                                      const DateTime& end,
                                                      int numberOfThreads) {
-    omp_set_num_threads(numberOfThreads); // Set the number of threads for this parallel region
+    omp_set_num_threads(numberOfThreads);
     int n = static_cast<int>(g_records.size());
-    
-    // Thread-local vectors to store results, avoiding race conditions
-    std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
 
-    // Parallel loop: Divide the loop iterations among threads (static schedule)
+    // Each thread collects matching indices (8 bytes each vs ~500+ bytes per record copy)
+    std::vector<std::vector<int>> localIdx(numberOfThreads);
+    for (auto& v : localIdx) v.reserve(n / numberOfThreads / 4); // rough estimate
+
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
         if (g_records[i].createdDate >= start && g_records[i].createdDate <= end) {
-            int t = omp_get_thread_num(); // Get ID of current thread
-            localResults[t].push_back(g_records[i]);
+            localIdx[omp_get_thread_num()].push_back(i);
         }
     }
 
-    // Combine results from all threads
+    // Count total matches and build result in one pass
+    std::size_t total = 0;
+    for (int t = 0; t < numberOfThreads; ++t) total += localIdx[t].size();
+
     std::vector<ServiceRequest> out;
+    out.reserve(total);
     for (int t = 0; t < numberOfThreads; ++t)
-        out.insert(out.end(), localResults[t].begin(), localResults[t].end());
+        for (int idx : localIdx[t])
+            out.push_back(g_records[idx]);
     return out;
 }
 
-// 2. Borough filter (case-insensitive)
+// 2. Borough filter — case-insensitive, no temp string allocation per record
 std::vector<ServiceRequest> filterByBorough(const std::string& borough,
                                             int numberOfThreads) {
     omp_set_num_threads(numberOfThreads);
     int n = static_cast<int>(g_records.size());
-    std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
 
-    std::string target = borough;
-    for (auto& c : target) c = static_cast<char>(std::toupper(c));
+    std::vector<std::vector<int>> localIdx(numberOfThreads);
+    for (auto& v : localIdx) v.reserve(n / numberOfThreads / 4);
 
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
-        std::string b = g_records[i].borough;
-        for (auto& c : b) c = static_cast<char>(std::toupper(c));
-        if (b == target) {
-            int t = omp_get_thread_num();
-            localResults[t].push_back(g_records[i]);
+        if (equalsIgnoreCase(g_records[i].borough, borough)) {
+            localIdx[omp_get_thread_num()].push_back(i);
         }
     }
 
+    std::size_t total = 0;
+    for (int t = 0; t < numberOfThreads; ++t) total += localIdx[t].size();
+
     std::vector<ServiceRequest> out;
+    out.reserve(total);
     for (int t = 0; t < numberOfThreads; ++t)
-        out.insert(out.end(), localResults[t].begin(), localResults[t].end());
+        for (int idx : localIdx[t])
+            out.push_back(g_records[idx]);
     return out;
 }
+
 /*
 // 3. Complaint substring search (case-insensitive)
 std::vector<ServiceRequest> searchByComplaint(const std::string& keyword,
@@ -367,7 +323,7 @@ int main(int argc, char* argv[]) {
     double memBefore = rssMemMB();
     std::cout << "Memory before load: " << memBefore << " MB" << std::endl;
 
-    g_records = loadDataParallel(filename, numberOfThreads);
+    g_records = loadData(filename);
 
     double memAfter = rssMemMB();
     std::cout << "Memory after load: " << memAfter << " MB" << std::endl;
