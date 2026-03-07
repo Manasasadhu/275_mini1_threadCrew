@@ -7,6 +7,9 @@
 #include <thread>
 #include <algorithm>
 #include <cstring>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include <omp.h>
 #include <mach/mach.h>
 
@@ -158,60 +161,57 @@ static bool equalsIgnoreCase(const std::string& a, const std::string& b) {
 //   4. Single pass to build the final result from indices.
 // ---------------------------------------------------------------------------
 
-// 1. Date range filter — returns indices, builds result vector at the end
-std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
-                                                     const DateTime& end,
-                                                     int numberOfThreads) {
+// 1. Date range filter — returns pointers to avoid copying records
+std::vector<const ServiceRequest*> filterByCreatedDateRange(const DateTime& start,
+                                                            const DateTime& end,
+                                                            int numberOfThreads) {
     omp_set_num_threads(numberOfThreads);
     int n = static_cast<int>(g_records.size());
 
-    // Each thread collects matching indices (8 bytes each vs ~500+ bytes per record copy)
-    std::vector<std::vector<int>> localIdx(numberOfThreads);
-    for (auto& v : localIdx) v.reserve(n / numberOfThreads / 4); // rough estimate
+    // Each thread collects pointers (8 bytes each vs ~500+ bytes per record copy)
+    std::vector<std::vector<const ServiceRequest*>> localPtrs(numberOfThreads);
+    for (auto& v : localPtrs) v.reserve(n / numberOfThreads / 4);
 
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
         if (g_records[i].createdDate >= start && g_records[i].createdDate <= end) {
-            localIdx[omp_get_thread_num()].push_back(i);
+            localPtrs[omp_get_thread_num()].push_back(&g_records[i]);
         }
     }
 
-    // Count total matches and build result in one pass
     std::size_t total = 0;
-    for (int t = 0; t < numberOfThreads; ++t) total += localIdx[t].size();
+    for (int t = 0; t < numberOfThreads; ++t) total += localPtrs[t].size();
 
-    std::vector<ServiceRequest> out;
+    std::vector<const ServiceRequest*> out;
     out.reserve(total);
     for (int t = 0; t < numberOfThreads; ++t)
-        for (int idx : localIdx[t])
-            out.push_back(g_records[idx]);
+        out.insert(out.end(), localPtrs[t].begin(), localPtrs[t].end());
     return out;
 }
 
-// 2. Borough filter — case-insensitive, no temp string allocation per record
-std::vector<ServiceRequest> filterByBorough(const std::string& borough,
-                                            int numberOfThreads) {
+// 2. Borough filter — case-insensitive, returns pointers, no temp string alloc
+std::vector<const ServiceRequest*> filterByBorough(const std::string& borough,
+                                                   int numberOfThreads) {
     omp_set_num_threads(numberOfThreads);
     int n = static_cast<int>(g_records.size());
 
-    std::vector<std::vector<int>> localIdx(numberOfThreads);
-    for (auto& v : localIdx) v.reserve(n / numberOfThreads / 4);
+    std::vector<std::vector<const ServiceRequest*>> localPtrs(numberOfThreads);
+    for (auto& v : localPtrs) v.reserve(n / numberOfThreads / 4);
 
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
         if (equalsIgnoreCase(g_records[i].borough, borough)) {
-            localIdx[omp_get_thread_num()].push_back(i);
+            localPtrs[omp_get_thread_num()].push_back(&g_records[i]);
         }
     }
 
     std::size_t total = 0;
-    for (int t = 0; t < numberOfThreads; ++t) total += localIdx[t].size();
+    for (int t = 0; t < numberOfThreads; ++t) total += localPtrs[t].size();
 
-    std::vector<ServiceRequest> out;
+    std::vector<const ServiceRequest*> out;
     out.reserve(total);
     for (int t = 0; t < numberOfThreads; ++t)
-        for (int idx : localIdx[t])
-            out.push_back(g_records[idx]);
+        out.insert(out.end(), localPtrs[t].begin(), localPtrs[t].end());
     return out;
 }
 
@@ -302,6 +302,21 @@ double averageLatitude(int numberOfThreads) {
 // ---------------------------------------------------------------------------
 // main() — benchmark harness
 // ---------------------------------------------------------------------------
+
+// Helper: returns current wall-clock time as a formatted string
+static std::string timestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()) % 1000;
+    std::tm buf;
+    localtime_r(&t, &buf);
+    std::ostringstream oss;
+    oss << std::put_time(&buf, "%Y-%m-%d %H:%M:%S")
+        << '.' << std::setfill('0') << std::setw(3) << ms.count();
+    return oss.str();
+}
+
 int main(int argc, char* argv[]) {
     std::string filename = "sample_data.csv";
     if (argc > 1) {
@@ -318,16 +333,16 @@ int main(int argc, char* argv[]) {
         numberOfThreads = std::atoi(argv[2]);
     }
     if (numberOfThreads <= 0) numberOfThreads = 1;
-    std::cout << "Thread count: " << numberOfThreads << std::endl;
+    std::cout << "\n[" << timestamp() << "] Thread count: " << numberOfThreads << std::endl;
 
     double memBefore = rssMemMB();
-    std::cout << "Memory before load: " << memBefore << " MB" << std::endl;
+    std::cout << "[" << timestamp() << "] Memory before load: " << memBefore << " MB" << std::endl;
 
     g_records = loadData(filename);
 
     double memAfter = rssMemMB();
-    std::cout << "Memory after load: " << memAfter << " MB" << std::endl;
-    std::cout << "Memory delta: " << (memAfter - memBefore) << " MB" << std::endl;
+    std::cout << "[" << timestamp() << "] Memory after load: " << memAfter << " MB" << std::endl;
+    std::cout << "[" << timestamp() << "] Memory delta: " << (memAfter - memBefore) << " MB" << std::endl;
 
     if (g_records.empty()) {
         std::cerr << "No records loaded. Exiting." << std::endl;
@@ -350,31 +365,56 @@ int main(int argc, char* argv[]) {
 
     auto measureVectorQuery = [&](const std::string& label, int runs, auto query) {
         using namespace std::chrono;
+        std::cout << "\n[" << timestamp() << "] Starting query: " << label
+                  << " (" << runs << " runs)" << std::endl;
+
         std::size_t count = 0;
-        auto startTime = high_resolution_clock::now();
+        double totalTime = 0.0;
+
         for (int i = 0; i < runs; ++i) {
+            auto iterStart = high_resolution_clock::now();
             auto res = query();
+            auto iterEnd = high_resolution_clock::now();
+            double iterTime = duration<double>(iterEnd - iterStart).count();
+            totalTime += iterTime;
+
             if (i == 0) count = res.size();
+
+            std::cout << "  [" << timestamp() << "] Run " << (i + 1) << "/" << runs
+                      << ": " << iterTime << "s"
+                      << " (result size=" << res.size() << ")" << std::endl;
         }
-        auto endTime = high_resolution_clock::now();
-        double total = duration<double>(endTime - startTime).count();
-        std::cout << label << " -> size=" << count
-                  << ", total=" << total << "s"
-                  << ", avg=" << (total / runs) << "s\n";
+
+        std::cout << "[" << timestamp() << "] " << label
+                  << " -> size=" << count
+                  << ", total=" << totalTime << "s"
+                  << ", avg=" << (totalTime / runs) << "s\n";
     };
 
     auto measureScalarQuery = [&](const std::string& label, int runs, auto query) {
         using namespace std::chrono;
+        std::cout << "\n[" << timestamp() << "] Starting query: " << label
+                  << " (" << runs << " runs)" << std::endl;
+
         double val = 0.0;
-        auto startTime = high_resolution_clock::now();
+        double totalTime = 0.0;
+
         for (int i = 0; i < runs; ++i) {
+            auto iterStart = high_resolution_clock::now();
             val = query();
+            auto iterEnd = high_resolution_clock::now();
+            double iterTime = duration<double>(iterEnd - iterStart).count();
+            totalTime += iterTime;
+
+            std::cout << "  [" << timestamp() << "] Run " << (i + 1) << "/" << runs
+                      << ": " << iterTime << "s"
+                      << " (value=" << val << ")" << std::endl;
         }
-        auto endTime = high_resolution_clock::now();
-        double total = duration<double>(endTime - startTime).count();
-        std::cout << label << " -> value=" << val
-                  << ", total=" << total << "s"
-                  << ", avg=" << (total / runs) << "s\n";
+
+        std::cout << "[" << timestamp() << "] " << label
+                  << " -> value=" << val
+                  << ", total=" << totalTime << "s"
+                  << ", avg=" << (totalTime / runs) << "s\n";
     };
 
     const int runs = 15;
