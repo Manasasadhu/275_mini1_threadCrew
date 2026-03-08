@@ -329,7 +329,7 @@ void printTopZones(const MapT& zones) {
     std::size_t totalZones = zones.size();
     std::size_t index = 0;
 
-    std::cout << "  Results – (" << totalZones << "/" << totalZones << "):\n";
+    std::cout << "  Results - (" << totalZones << "/" << totalZones << "):\n";
 
     for (const auto& kv : zones) {
         const auto& borough = kv.first;
