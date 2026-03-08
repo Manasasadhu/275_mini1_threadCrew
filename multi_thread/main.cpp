@@ -13,12 +13,7 @@
 #include <cmath>
 #include <unordered_map>
 
-// Global dataset — filled once during loading, read-only during queries
 static std::vector<ServiceRequest> g_records;
-
-// ---------------------------------------------------------------------------
-// Utility functions (reused from single_thread/main.cpp)
-// ---------------------------------------------------------------------------
 
 // Helper function to remove surrounding quotes from a string if present.
 std::string cleanString(const std::string& str) {
@@ -79,16 +74,18 @@ static double rssMemMB() {
     return static_cast<double>(info.resident_size) / (1024.0 * 1024.0);
 }
 
-// ---------------------------------------------------------------------------
-// Parallel CSV loader using std::thread
-// Loads data by splitting the file into chunks and processing them in parallel.
-// ---------------------------------------------------------------------------
+constexpr std::size_t MAX_RECORDS = 10000000;
+#include <atomic>
+
+/*
 std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
-                                              int numberOfThreads) {
+                                             int numberOfThreads) {
+    static std::atomic<std::size_t> globalCount{0};
     if (numberOfThreads <= 0) numberOfThreads = 1;
 
     auto wallStart = std::chrono::high_resolution_clock::now();
     std::cout << "Loading NYC 311 data from: " << filename << std::endl;
+
 
     std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
@@ -102,6 +99,8 @@ std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
     std::string buffer(static_cast<std::size_t>(fileSize), '\0');
     file.read(&buffer[0], fileSize);
     file.close();
+    std::cout << "[DEBUG] File read into buffer. Size: " << buffer.size() / (1024 * 1024) << " MB" << std::endl;
+    std::cout << "[DEBUG] Memory usage after file read: " << rssMemMB() << " MB" << std::endl;
 
     // Find end of header line to skip it
     std::size_t headerEnd = buffer.find('\n');
@@ -110,6 +109,7 @@ std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
         return {};
     }
     std::size_t dataStart = headerEnd + 1;
+
 
     // Divide the file content into equal chunks for each thread
     std::size_t dataLen = buffer.size() - dataStart;
@@ -120,36 +120,42 @@ std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
 
     chunkStarts[0] = dataStart;
     for (int t = 1; t < numberOfThreads; ++t) {
-        std::size_t pos = dataStart + t * chunkSize;
+        std::size_t pos = data_start + t * chunk_size;
         // Adjust split position: scan forward to next newline to ensure we don't split a line in the middle
         while (pos < buffer.size() && buffer[pos] != '\n') ++pos;
         if (pos < buffer.size()) ++pos; // move past the newline
-        chunkStarts[t] = pos;
-        chunkEnds[t - 1] = pos;
+        chunk_start[t] = pos;
+        chunk_end[t - 1] = pos;
     }
-    chunkEnds[numberOfThreads - 1] = buffer.size();
+    chunk_end[numberOfThreads - 1] = buffer.size();
 
-    // Print chunk info for debugging/verification
+    std::cout << "[DEBUG] Chunks allocated. Memory usage: " << rssMemMB() << " MB" << std::endl;
     for (int t = 0; t < numberOfThreads; ++t) {
         std::cout << "  Chunk " << t << ": bytes ["
-                  << chunkStarts[t] << ", " << chunkEnds[t] << ")"
-                  << " size=" << (chunkEnds[t] - chunkStarts[t]) << std::endl;
+                  << chunk_start[t] << ", " << chunk_end[t] << ")"
+                  << " size=" << (chunk_end[t] - chunk_start[t]) << std::endl;
     }
 
     // Per-thread local storage to avoid locking/contention on a shared vector
     std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
     std::vector<std::size_t> localLineCount(numberOfThreads, 0);
 
+
     // Spawn threads to process each chunk independently
     std::vector<std::thread> threads;
+    std::cout << "[DEBUG] Spawning threads..." << std::endl;
     for (int t = 0; t < numberOfThreads; ++t) {
+        std::cout << "[DEBUG] Launching thread " << t << std::endl;
         threads.emplace_back([&, t]() {
-            std::size_t start = chunkStarts[t];
-            std::size_t end   = chunkEnds[t];
+            std::size_t start = chunk_start[t];
+            std::size_t end   = chunk_end[t];
             std::string line;
             line.reserve(2048);
 
             for (std::size_t pos = start; pos < end; ) {
+                // Early exit if global limit reached
+                if (globalCount.load(std::memory_order_relaxed) >= MAX_RECORDS) break;
+
                 // Extract one line from the buffer
                 line.clear();
                 while (pos < end && buffer[pos] != '\n') {
@@ -166,7 +172,14 @@ std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
                 auto fields = parseCSVLine(line);
                 ServiceRequest req;
                 if (req.fromFields(fields)) {
-                    localResults[t].push_back(std::move(req));
+                    // Atomically increment and check if still under limit
+                    std::size_t curr = globalCount.fetch_add(1, std::memory_order_relaxed);
+                    if (curr < MAX_RECORDS) {
+                        localResults[t].push_back(std::move(req));
+                    } else {
+                        // If limit exceeded, stop processing
+                        break;
+                    }
                 }
             }
         });
@@ -174,6 +187,7 @@ std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
 
     // Wait for all threads to complete
     for (auto& th : threads) th.join();
+    std::cout << "[DEBUG] All threads joined. Memory usage: " << rssMemMB() << " MB" << std::endl;
 
     // Merge thread-local results into the final result vector
     std::size_t totalLines = 1; // count header
@@ -185,11 +199,13 @@ std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
 
     std::vector<ServiceRequest> result;
     result.reserve(totalValid);
+    std::cout << "[DEBUG] Merging thread-local results. Memory usage: " << rssMemMB() << " MB" << std::endl;
     for (int t = 0; t < numberOfThreads; ++t) {
         result.insert(result.end(),
                       std::make_move_iterator(localResults[t].begin()),
                       std::make_move_iterator(localResults[t].end()));
     }
+    std::cout << "[DEBUG] Merge complete. Final memory usage: " << rssMemMB() << " MB" << std::endl;
 
     auto wallEnd = std::chrono::high_resolution_clock::now();
     double elapsed = std::chrono::duration<double>(wallEnd - wallStart).count();
@@ -197,8 +213,55 @@ std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
     std::cout << "Loaded " << totalValid << " records in "
               << elapsed << " seconds" << std::endl;
     std::cout << "Total lines processed: " << totalLines << std::endl;
+    if (totalValid >= MAX_RECORDS) {
+        std::cout << "[DEBUG] Record limit of " << MAX_RECORDS << " reached. Stopped loading more records." << std::endl;
+    }
 
     return result;
+}
+*/
+
+// Single-threaded, streaming loader (memory efficient)
+std::vector<ServiceRequest> loadDataParallel(const std::string& filename, int /*numberOfThreads*/) {
+    constexpr std::size_t MAX_RECORDS = 10000000;
+    auto start = std::chrono::high_resolution_clock::now();
+    std::cout << "[SINGLE-THREAD FALLBACK] Loading NYC 311 data from: " << filename << std::endl;
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error opening file: " << filename << std::endl;
+        return {};
+    }
+    std::vector<ServiceRequest> records;
+    std::string line;
+    std::size_t lineCount = 0;
+    std::size_t validRecords = 0;
+    // Skip header
+    if (std::getline(file, line)) {
+        lineCount++;
+        std::cout << "Skipped header: " << line.substr(0, 100) << "..." << std::endl;
+    }
+    // Read data lines
+    while (std::getline(file, line)) {
+        lineCount++;
+        if (lineCount % 1000000 == 0) {
+            std::cout << "Processed " << lineCount << " lines, loaded " << validRecords << " records..." << std::endl;
+        }
+        auto fields = parseCSVLine(line);
+        ServiceRequest req;
+        if (req.fromFields(fields)) {
+            records.push_back(std::move(req));
+            validRecords++;
+            if (validRecords >= MAX_RECORDS) {
+                std::cout << "Reached limit of " << MAX_RECORDS << " records, stopping load." << std::endl;
+                break;
+            }
+        }
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = end - start;
+    std::cout << "Loaded " << validRecords << " records in " << duration.count() << " seconds" << std::endl;
+    std::cout << "Total lines processed: " << lineCount << std::endl;
+    return records;
 }
 
 // ---------------------------------------------------------------------------
@@ -339,10 +402,11 @@ double averageLatitude(int numberOfThreads) {
         sum += g_records[i].latitude;
     }
 
+
     return sum / g_records.size();
 }
 
-/ ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // 7. Aggregation: Borough totals + top complaint (SERIAL)
 // ---------------------------------------------------------------------------
 struct ZoneStats {
@@ -351,7 +415,6 @@ struct ZoneStats {
     std::map<std::string, std::size_t> byAgency;
     std::map<std::string, std::size_t> byStatus;
 };
-
 
 std::map<std::string, ZoneStats> aggregateByBorough() {
     std::map<std::string, ZoneStats> result;
@@ -443,22 +506,23 @@ void printTopZones(const MapT& zones) {
 // ---------------------------------------------------------------------------
 // main() — benchmark harness
 // ---------------------------------------------------------------------------
-int main(int argc, char* argv[]) {
-    std::string filename = "sample_data.csv";
-    if (argc > 1) {
-        filename = argv[1];
-    } else {
-        std::cout << "Usage: " << argv[0] << " <csv_filename> [num_threads]" << std::endl;
-        std::cout << "No file provided, defaulting to: " << filename << std::endl;
-    }
 
-    // Allow thread count to be passed as a second argument for benchmarking;
-    // otherwise default to hardware concurrency.
-    int numberOfThreads = static_cast<int>(std::thread::hardware_concurrency());
+int main(int argc, char* argv[]) {
+    std::string filename = "/Users/aravindreddy/Downloads/SJSU ClassWork/275 EAD/Mini1_Datasets/311_combined.csv.";
+    int numberOfThreads = 10;
+    if (argc > 1 && std::string(argv[1]).length() > 0) {
+        filename = argv[1];
+    }
     if (argc > 2) {
         numberOfThreads = std::atoi(argv[2]);
+    } else {
+        // Check OMP_THREAD_COUNT environment variable if not provided as argument
+        const char* env_threads = std::getenv("OMP_THREAD_COUNT");
+        if (env_threads) {
+            numberOfThreads = std::atoi(env_threads);
+        }
     }
-    if (numberOfThreads <= 0) numberOfThreads = 1;
+    if (numberOfThreads <= 0) numberOfThreads = static_cast<int>(std::thread::hardware_concurrency());
     std::cout << "Thread count: " << numberOfThreads << std::endl;
 
     double memBefore = rssMemMB();
@@ -473,17 +537,6 @@ int main(int argc, char* argv[]) {
     if (g_records.empty()) {
         std::cerr << "No records loaded. Exiting." << std::endl;
         return 1;
-    }
-
-    // Sample records
-    std::cout << "\n=== Sample Records ===" << std::endl;
-    for (int i = 0; i < 5 && i < static_cast<int>(g_records.size()); ++i) {
-        const auto& r = g_records[i];
-        std::cout << "#" << i + 1 << ": "
-                  << r.uniqueKey << " | "
-                  << r.createdDate.toString() << " | "
-                  << r.borough << " | "
-                  << r.complaintType << "\n";
     }
 
     // Benchmark helpers
@@ -551,10 +604,6 @@ int main(int argc, char* argv[]) {
     // Complaint "rodent"
     measureVectorQuery("complaint 'rodent'", runs,
         [&]() { return searchByComplaint("rodent", numberOfThreads); });
-
-    // Sort by date
-    measureVectorQuery("sorted date", runs,
-        [&]() { return sortByCreatedDate(numberOfThreads); });
 
     // Lat/lon box (NYC)
     measureVectorQuery("lat/lon box", runs,

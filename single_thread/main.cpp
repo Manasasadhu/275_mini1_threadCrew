@@ -94,10 +94,9 @@ std::vector<ServiceRequest> loadData(const std::string& filename) {
     // Read data lines
     while (std::getline(file, line)) {
         lineCount++;
-        if (lineCount % 100000 == 0) {
+        if (lineCount % 1000000 == 0) {
             std::cout << "Processed " << lineCount << " lines, loaded " << validRecords << " records..." << std::endl;
         }
-
         std::vector<std::string> fields = parseCSVLine(line);
         ServiceRequest req;
         if (req.fromFields(fields)) {
@@ -121,10 +120,9 @@ std::vector<ServiceRequest> loadData(const std::string& filename) {
     return records;
 }
 
-// global dataset container
 static std::vector<ServiceRequest> g_records;
 
-// 1. range query on createdDate
+// Query 1 - range query on createdDate
 std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
                                                      const DateTime& end) {
     std::vector<ServiceRequest> out;
@@ -135,7 +133,7 @@ std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
     return out;
 }
 
-// 2. exact match (case-insensitive) on borough
+// Query 2 - exact match (case-insensitive) on borough
 std::vector<ServiceRequest> filterByBorough(const std::string& borough) {
     std::vector<ServiceRequest> out;
     for (const auto& r : g_records) {
@@ -151,7 +149,7 @@ std::vector<ServiceRequest> filterByBorough(const std::string& borough) {
     return out;
 }
 
-// 3. substring search on complaintType (case-insensitive)
+// Query 3 - substring search on complaintType (case-insensitive)
 std::vector<ServiceRequest> searchByComplaint(const std::string& keyword) {
     std::vector<ServiceRequest> out;
     std::string key = keyword;
@@ -166,7 +164,7 @@ std::vector<ServiceRequest> searchByComplaint(const std::string& keyword) {
     return out;
 }
 
-// 4. bounding box on latitude/longitude
+// Query 4 - bounding box on latitude/longitude
 // Returns pointers to the matching records instead of copying full objects.
 // This keeps the memory footprint small even when the result set is large.
 std::vector<const ServiceRequest*> filterByLatLonBox(double minLat, double maxLat,
@@ -182,16 +180,7 @@ std::vector<const ServiceRequest*> filterByLatLonBox(double minLat, double maxLa
     return out;
 }
 
-// 5. sort a copy by createdDate ascending 
-std::vector<ServiceRequest> sortByCreatedDate() {
-    std::vector<ServiceRequest> recs = g_records;  // copy
-    std::sort(recs.begin(), recs.end(), [](const ServiceRequest &a, const ServiceRequest &b) {
-        return a.createdDate < b.createdDate;
-    });
-    return recs;
-}
-
-// 6. compute average latitude of the loaded records - demonstrates an aggregation (reduce) operation.
+// Query 5 - compute average latitude of the loaded records - demonstrates an aggregation (reduce) operation.
 double averageLatitude() {
     if (g_records.empty()) return 0.0;
     double sum = 0.0;
@@ -199,9 +188,7 @@ double averageLatitude() {
     return sum / g_records.size();
 }
 
-// ---------------------------------------------------------------------------
-// 7. Aggregation: Borough totals + top complaint (SERIAL)
-// ---------------------------------------------------------------------------
+// Query 6 - Aggregation: Borough totals + top complaint (SERIAL)
 struct ZoneStats {
     std::size_t totalCount = 0;
     std::map<std::string, std::size_t> byComplaintType;
@@ -249,7 +236,7 @@ void printTopZones(const MapT& zones) {
 // Takes all 20 million records and groups them by zip code, building a summary (total complaints, breakdown by type/agency/status) for each unique zip code found in the dataset.
 
 int main() {
-    const std::string filename = "/Users/Asha/Desktop/Asha workspace/275-mini1/dataset/311_combined.csv";
+    const std::string filename = "/Users/aravindreddy/Downloads/SJSU ClassWork/275 EAD/Mini1_Datasets/311_combined.csv.";
 
     double memBefore = rssMemMB();
     std::cout << "Memory before load: " << memBefore << " MB" << std::endl;
@@ -265,19 +252,8 @@ int main() {
         return 1;
     }
 
-    // print a few sample records for verification
-    std::cout << "\n=== Sample Records ===" << std::endl;
-    for (int i = 0; i < 5 && i < (int)g_records.size(); ++i) {
-        const auto &r = g_records[i];
-        std::cout << "#" << i+1 << ": "
-                  << r.uniqueKey << " | "
-                  << r.createdDate.toString() << " | "
-                  << r.borough << " | "
-                  << r.complaintType << "\n";
-    }
-
     // run each example query to verify functionality and measure performance
-    std::cout << "\n=== Query Outputs ===" << std::endl;
+    std::cout << "\nQuery Outputs - " << std::endl;
 
     // helper lambdas for timing
     auto measureVectorQuery = [&](const std::string &label, int runs, auto query) {
@@ -310,8 +286,24 @@ int main() {
                   << ", avg=" << (total / runs) << "s\n";
     };
 
+    auto measureMapQuery = [&](const std::string& label, int runs2, auto query) {
+        using namespace std::chrono;
+        std::size_t zoneCount = 0;
+        auto startTime = high_resolution_clock::now();
+        for (int i = 0; i < runs2; ++i) {
+            auto res = query();
+            if (i == 0) zoneCount = res.size();
+        }
+        auto endTime = high_resolution_clock::now();
+        double total = duration<double>(endTime - startTime).count();
+        std::cout << label << " -> zones=" << zoneCount
+                  << ", total=" << total << "s"
+                  << ", avg=" << (total / runs2) << "s\n";
+    };
+
     const int runs = 15;  // number of repetitions for timing
 
+    // add print statements to show query outputs for verification 
     // date range query
     DateTime start = DateTime::parse("01/01/2013 12:00:00 AM");
     DateTime end   = DateTime::parse("12/31/2013 11:59:59 PM");
@@ -326,17 +318,16 @@ int main() {
     measureVectorQuery("complaint 'rodent'", runs,
                       [&](){ return searchByComplaint("rodent"); });
 
-    // sort query 
-    // complaint substring
-    //measureVectorQuery("sorted date", runs,
-         //            [&](){ return sortByCreatedDate(); });
-
     // lat/lon box example (rough NYC box)
    measureVectorQuery("lat/lon box", runs,
                       [&](){ return filterByLatLonBox(40.5, 40.9, -74.25, -73.7); });
 
     // average latitude
    measureScalarQuery("average latitude", runs, [](){ return averageLatitude(); });
+
+   // Borough aggregation + top complaint
+   measureMapQuery("borough aggregation total+top complaint", runs,
+                    [](){ return aggregateByBorough(); });
 
     auto t0 = std::chrono::high_resolution_clock::now();
     auto result = aggregateByBorough();
