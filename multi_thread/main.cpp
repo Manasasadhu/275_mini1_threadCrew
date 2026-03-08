@@ -7,11 +7,12 @@
 #include <thread>
 #include <algorithm>
 #include <cstring>
-#include <ctime>
-#include <iomanip>
-#include <sstream>
 #include <omp.h>
 #include <mach/mach.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 // Global dataset — filled once during loading, read-only during queries
 static std::vector<ServiceRequest> g_records;
@@ -83,138 +84,181 @@ static double rssMemMB() {
 // Parallel CSV loader using std::thread
 // Loads data by splitting the file into chunks and processing them in parallel.
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Sequential CSV loader — same logic as single_thread/main.cpp.
-// Parallelism is only applied to the query functions, not loading.
-// ---------------------------------------------------------------------------
-std::vector<ServiceRequest> loadData(const std::string& filename) {
-    auto start = std::chrono::high_resolution_clock::now();
+std::vector<ServiceRequest> loadDataParallel(const std::string& filename,
+                                              int numberOfThreads) {
+    if (numberOfThreads <= 0) numberOfThreads = 1;
 
+    auto wallStart = std::chrono::high_resolution_clock::now();
     std::cout << "Loading NYC 311 data from: " << filename << std::endl;
 
-    std::ifstream file(filename);
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         std::cerr << "Error opening file: " << filename << std::endl;
         return {};
     }
 
-    std::vector<ServiceRequest> records;
-    std::string line;
-    std::size_t lineCount = 0;
-    std::size_t validRecords = 0;
+    // Read entire file into a memory buffer for fast access
+    auto fileSize = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::string buffer(static_cast<std::size_t>(fileSize), '\0');
+    file.read(&buffer[0], fileSize);
+    file.close();
 
-    // Skip header
-    if (std::getline(file, line)) {
-        lineCount++;
-        std::cout << "Skipped header: " << line.substr(0, 100) << "..." << std::endl;
+    // Find end of header line to skip it
+    std::size_t headerEnd = buffer.find('\n');
+    if (headerEnd == std::string::npos) {
+        std::cout << "File is empty or has only a header. 0 records loaded." << std::endl;
+        return {};
+    }
+    std::size_t dataStart = headerEnd + 1;
+
+    // Divide the file content into equal chunks for each thread
+    std::size_t dataLen = buffer.size() - dataStart;
+    std::size_t chunkSize = dataLen / numberOfThreads;
+
+    std::vector<std::size_t> chunkStarts(numberOfThreads);
+    std::vector<std::size_t> chunkEnds(numberOfThreads);
+
+    chunkStarts[0] = dataStart;
+    for (int t = 1; t < numberOfThreads; ++t) {
+        std::size_t pos = dataStart + t * chunkSize;
+        // Adjust split position: scan forward to next newline to ensure we don't split a line in the middle
+        while (pos < buffer.size() && buffer[pos] != '\n') ++pos;
+        if (pos < buffer.size()) ++pos; // move past the newline
+        chunkStarts[t] = pos;
+        chunkEnds[t - 1] = pos;
+    }
+    chunkEnds[numberOfThreads - 1] = buffer.size();
+
+    // Print chunk info for debugging/verification
+    for (int t = 0; t < numberOfThreads; ++t) {
+        std::cout << "  Chunk " << t << ": bytes ["
+                  << chunkStarts[t] << ", " << chunkEnds[t] << ")"
+                  << " size=" << (chunkEnds[t] - chunkStarts[t]) << std::endl;
     }
 
-    // Read data lines — one at a time, no parallel loading
-    while (std::getline(file, line)) {
-        lineCount++;
-        if (lineCount % 100000 == 0) {
-            std::cout << "Processed " << lineCount << " lines, loaded " << validRecords << " records..." << std::endl;
-        }
+    // Per-thread local storage to avoid locking/contention on a shared vector
+    std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
+    std::vector<std::size_t> localLineCount(numberOfThreads, 0);
 
-        std::vector<std::string> fields = parseCSVLine(line);
-        ServiceRequest req;
-        if (req.fromFields(fields)) {
-            records.push_back(std::move(req));
-            validRecords++;
-        } else {
-            std::cerr << "Malformed record at line " << lineCount << std::endl;
-        }
+    // Spawn threads to process each chunk independently
+    std::vector<std::thread> threads;
+    for (int t = 0; t < numberOfThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            std::size_t start = chunkStarts[t];
+            std::size_t end   = chunkEnds[t];
+            std::string line;
+            line.reserve(2048);
+
+            for (std::size_t pos = start; pos < end; ) {
+                // Extract one line from the buffer
+                line.clear();
+                while (pos < end && buffer[pos] != '\n') {
+                    if (buffer[pos] != '\r')
+                        line += buffer[pos];
+                    ++pos;
+                }
+                if (pos < end) ++pos; // skip newline
+
+                if (line.empty()) continue;
+                localLineCount[t]++;
+
+                // Parse the line and create a ServiceRequest object
+                auto fields = parseCSVLine(line);
+                ServiceRequest req;
+                if (req.fromFields(fields)) {
+                    localResults[t].push_back(std::move(req));
+                }
+            }
+        });
     }
 
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> duration = end - start;
+    // Wait for all threads to complete
+    for (auto& th : threads) th.join();
 
-    std::cout << "Loaded " << validRecords << " records in " << duration.count() << " seconds" << std::endl;
-    std::cout << "Total lines processed: " << lineCount << std::endl;
-
-    return records;
-}
-
-// ---------------------------------------------------------------------------
-// Helper: case-insensitive string equality without allocating a temp string.
-// Compares character-by-character, converting to uppercase on the fly.
-// ---------------------------------------------------------------------------
-static bool equalsIgnoreCase(const std::string& a, const std::string& b) {
-    if (a.size() != b.size()) return false;
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        if (std::toupper(static_cast<unsigned char>(a[i])) !=
-            std::toupper(static_cast<unsigned char>(b[i])))
-            return false;
+    // Merge thread-local results into the final result vector
+    std::size_t totalLines = 1; // count header
+    std::size_t totalValid = 0;
+    for (int t = 0; t < numberOfThreads; ++t) {
+        totalLines += localLineCount[t];
+        totalValid += localResults[t].size();
     }
-    return true;
+
+    std::vector<ServiceRequest> result;
+    result.reserve(totalValid);
+    for (int t = 0; t < numberOfThreads; ++t) {
+        result.insert(result.end(),
+                      std::make_move_iterator(localResults[t].begin()),
+                      std::make_move_iterator(localResults[t].end()));
+    }
+
+    auto wallEnd = std::chrono::high_resolution_clock::now();
+    double elapsed = std::chrono::duration<double>(wallEnd - wallStart).count();
+
+    std::cout << "Loaded " << totalValid << " records in "
+              << elapsed << " seconds" << std::endl;
+    std::cout << "Total lines processed: " << totalLines << std::endl;
+
+    return result;
 }
 
 // ---------------------------------------------------------------------------
 // Parallel query functions (OpenMP)
-//
-// Key optimizations vs the naive version:
-//   1. Store indices instead of copying full ServiceRequest objects.
-//      Each record has ~20 std::string fields — copying millions of them
-//      hammers the heap allocator which serializes across threads.
-//   2. Case-insensitive comparisons done in-place (no temp string alloc).
-//   3. Pre-reserve thread-local vectors to reduce reallocation.
-//   4. Single pass to build the final result from indices.
+// These functions use OpenMP for data parallelism.
 // ---------------------------------------------------------------------------
 
-// 1. Date range filter — returns pointers to avoid copying records
-std::vector<const ServiceRequest*> filterByCreatedDateRange(const DateTime& start,
-                                                            const DateTime& end,
-                                                            int numberOfThreads) {
-    omp_set_num_threads(numberOfThreads);
+// 1. Date range filter
+// Uses OpenMP to iterate over the global dataset in parallel chunks.
+std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
+                                                     const DateTime& end,
+                                                     int numberOfThreads) {
+    omp_set_num_threads(numberOfThreads); // Set the number of threads for this parallel region
     int n = static_cast<int>(g_records.size());
+    
+    // Thread-local vectors to store results, avoiding race conditions
+    std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
 
-    // Each thread collects pointers (8 bytes each vs ~500+ bytes per record copy)
-    std::vector<std::vector<const ServiceRequest*>> localPtrs(numberOfThreads);
-    for (auto& v : localPtrs) v.reserve(n / numberOfThreads / 4);
-
+    // Parallel loop: Divide the loop iterations among threads (static schedule)
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
         if (g_records[i].createdDate >= start && g_records[i].createdDate <= end) {
-            localPtrs[omp_get_thread_num()].push_back(&g_records[i]);
+            int t = omp_get_thread_num(); // Get ID of current thread
+            localResults[t].push_back(g_records[i]);
         }
     }
 
-    std::size_t total = 0;
-    for (int t = 0; t < numberOfThreads; ++t) total += localPtrs[t].size();
-
-    std::vector<const ServiceRequest*> out;
-    out.reserve(total);
+    // Combine results from all threads
+    std::vector<ServiceRequest> out;
     for (int t = 0; t < numberOfThreads; ++t)
-        out.insert(out.end(), localPtrs[t].begin(), localPtrs[t].end());
+        out.insert(out.end(), localResults[t].begin(), localResults[t].end());
     return out;
 }
 
-// 2. Borough filter — case-insensitive, returns pointers, no temp string alloc
-std::vector<const ServiceRequest*> filterByBorough(const std::string& borough,
-                                                   int numberOfThreads) {
+// 2. Borough filter (case-insensitive)
+std::vector<ServiceRequest> filterByBorough(const std::string& borough,
+                                            int numberOfThreads) {
     omp_set_num_threads(numberOfThreads);
     int n = static_cast<int>(g_records.size());
+    std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
 
-    std::vector<std::vector<const ServiceRequest*>> localPtrs(numberOfThreads);
-    for (auto& v : localPtrs) v.reserve(n / numberOfThreads / 4);
+    std::string target = borough;
+    for (auto& c : target) c = static_cast<char>(std::toupper(c));
 
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
-        if (equalsIgnoreCase(g_records[i].borough, borough)) {
-            localPtrs[omp_get_thread_num()].push_back(&g_records[i]);
+        std::string b = g_records[i].borough;
+        for (auto& c : b) c = static_cast<char>(std::toupper(c));
+        if (b == target) {
+            int t = omp_get_thread_num();
+            localResults[t].push_back(g_records[i]);
         }
     }
 
-    std::size_t total = 0;
-    for (int t = 0; t < numberOfThreads; ++t) total += localPtrs[t].size();
-
-    std::vector<const ServiceRequest*> out;
-    out.reserve(total);
+    std::vector<ServiceRequest> out;
     for (int t = 0; t < numberOfThreads; ++t)
-        out.insert(out.end(), localPtrs[t].begin(), localPtrs[t].end());
+        out.insert(out.end(), localResults[t].begin(), localResults[t].end());
     return out;
 }
-
 /*
 // 3. Complaint substring search (case-insensitive)
 std::vector<ServiceRequest> searchByComplaint(const std::string& keyword,
@@ -302,21 +346,6 @@ double averageLatitude(int numberOfThreads) {
 // ---------------------------------------------------------------------------
 // main() — benchmark harness
 // ---------------------------------------------------------------------------
-
-// Helper: returns current wall-clock time as a formatted string
-static std::string timestamp() {
-    auto now = std::chrono::system_clock::now();
-    auto t = std::chrono::system_clock::to_time_t(now);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()) % 1000;
-    std::tm buf;
-    localtime_r(&t, &buf);
-    std::ostringstream oss;
-    oss << std::put_time(&buf, "%Y-%m-%d %H:%M:%S")
-        << '.' << std::setfill('0') << std::setw(3) << ms.count();
-    return oss.str();
-}
-
 int main(int argc, char* argv[]) {
     std::string filename = "sample_data.csv";
     if (argc > 1) {
@@ -333,16 +362,16 @@ int main(int argc, char* argv[]) {
         numberOfThreads = std::atoi(argv[2]);
     }
     if (numberOfThreads <= 0) numberOfThreads = 1;
-    std::cout << "\n[" << timestamp() << "] Thread count: " << numberOfThreads << std::endl;
+    std::cout << "Thread count: " << numberOfThreads << std::endl;
 
     double memBefore = rssMemMB();
-    std::cout << "[" << timestamp() << "] Memory before load: " << memBefore << " MB" << std::endl;
+    std::cout << "Memory before load: " << memBefore << " MB" << std::endl;
 
-    g_records = loadData(filename);
+    g_records = loadDataParallel(filename, numberOfThreads);
 
     double memAfter = rssMemMB();
-    std::cout << "[" << timestamp() << "] Memory after load: " << memAfter << " MB" << std::endl;
-    std::cout << "[" << timestamp() << "] Memory delta: " << (memAfter - memBefore) << " MB" << std::endl;
+    std::cout << "Memory after load: " << memAfter << " MB" << std::endl;
+    std::cout << "Memory delta: " << (memAfter - memBefore) << " MB" << std::endl;
 
     if (g_records.empty()) {
         std::cerr << "No records loaded. Exiting." << std::endl;
@@ -365,56 +394,31 @@ int main(int argc, char* argv[]) {
 
     auto measureVectorQuery = [&](const std::string& label, int runs, auto query) {
         using namespace std::chrono;
-        std::cout << "\n[" << timestamp() << "] Starting query: " << label
-                  << " (" << runs << " runs)" << std::endl;
-
         std::size_t count = 0;
-        double totalTime = 0.0;
-
+        auto startTime = high_resolution_clock::now();
         for (int i = 0; i < runs; ++i) {
-            auto iterStart = high_resolution_clock::now();
             auto res = query();
-            auto iterEnd = high_resolution_clock::now();
-            double iterTime = duration<double>(iterEnd - iterStart).count();
-            totalTime += iterTime;
-
             if (i == 0) count = res.size();
-
-            std::cout << "  [" << timestamp() << "] Run " << (i + 1) << "/" << runs
-                      << ": " << iterTime << "s"
-                      << " (result size=" << res.size() << ")" << std::endl;
         }
-
-        std::cout << "[" << timestamp() << "] " << label
-                  << " -> size=" << count
-                  << ", total=" << totalTime << "s"
-                  << ", avg=" << (totalTime / runs) << "s\n";
+        auto endTime = high_resolution_clock::now();
+        double total = duration<double>(endTime - startTime).count();
+        std::cout << label << " -> size=" << count
+                  << ", total=" << total << "s"
+                  << ", avg=" << (total / runs) << "s\n";
     };
 
     auto measureScalarQuery = [&](const std::string& label, int runs, auto query) {
         using namespace std::chrono;
-        std::cout << "\n[" << timestamp() << "] Starting query: " << label
-                  << " (" << runs << " runs)" << std::endl;
-
         double val = 0.0;
-        double totalTime = 0.0;
-
+        auto startTime = high_resolution_clock::now();
         for (int i = 0; i < runs; ++i) {
-            auto iterStart = high_resolution_clock::now();
             val = query();
-            auto iterEnd = high_resolution_clock::now();
-            double iterTime = duration<double>(iterEnd - iterStart).count();
-            totalTime += iterTime;
-
-            std::cout << "  [" << timestamp() << "] Run " << (i + 1) << "/" << runs
-                      << ": " << iterTime << "s"
-                      << " (value=" << val << ")" << std::endl;
         }
-
-        std::cout << "[" << timestamp() << "] " << label
-                  << " -> value=" << val
-                  << ", total=" << totalTime << "s"
-                  << ", avg=" << (totalTime / runs) << "s\n";
+        auto endTime = high_resolution_clock::now();
+        double total = duration<double>(endTime - startTime).count();
+        std::cout << label << " -> value=" << val
+                  << ", total=" << total << "s"
+                  << ", avg=" << (total / runs) << "s\n";
     };
 
     const int runs = 15;
