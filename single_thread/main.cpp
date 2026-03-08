@@ -8,6 +8,122 @@
 #include <algorithm> 
 #include <map>
 #include <cmath>
+#include <type_traits>
+#include <utility>
+#include <iomanip>
+
+// Detect if type has .size()
+template <typename T>
+class has_size {
+private:
+    template <typename U>
+    static auto test(int) -> decltype(std::declval<const U&>().size(), std::true_type{});
+    template <typename>
+    static std::false_type test(...);
+public:
+    static constexpr bool value = decltype(test<T>(0))::value;
+};
+
+// Detect if type supports operator[](size_t) (vector-like)
+template <typename T>
+class has_index {
+private:
+    template <typename U>
+    static auto test(int) -> decltype(std::declval<const U&>()[std::size_t{}], std::true_type{});
+    template <typename>
+    static std::false_type test(...);
+public:
+    static constexpr bool value = decltype(test<T>(0))::value;
+};
+
+// Print summary for sized results
+template <typename ResultT>
+typename std::enable_if<has_size<ResultT>::value>::type
+printSummary(const std::string& label, int runs, double total, const ResultT& first) {
+    std::cout << label
+              << " -> size=" << first.size()
+              << ", total=" << total << "s"
+              << ", avg=" << (total / runs) << "s\n";
+}
+
+// Print summary for scalar results
+template <typename ResultT>
+typename std::enable_if<!has_size<ResultT>::value>::type
+printSummary(const std::string& label, int runs, double total, const ResultT& first) {
+    std::cout << label
+              << " -> value=" << first
+              << ", total=" << total << "s"
+              << ", avg=" << (total / runs) << "s\n";
+}
+
+// Sample printer for vector-like containers (size + operator[])
+template <typename ResultT, typename PrintItemFn>
+typename std::enable_if<has_size<ResultT>::value && has_index<ResultT>::value>::type
+printSample(const ResultT& res, std::size_t sampleN, PrintItemFn printItem) {
+    if (sampleN == 0) return;
+    std::size_t n = res.size();
+    std::size_t k = (sampleN < n) ? sampleN : n;
+
+    std::cout << "  Top 5 Results - (" << k << "/" << n << "):\n";
+    for (std::size_t i = 0; i < k; ++i) {
+        printItem(res[i], i);
+    }
+}
+
+// Sample printer for sized-but-not-indexable containers (e.g., map): do nothing by default
+template <typename ResultT, typename PrintItemFn>
+typename std::enable_if<has_size<ResultT>::value && !has_index<ResultT>::value>::type
+printSample(const ResultT&, std::size_t, PrintItemFn) {
+    // no-op (map/set). You already print map summaries separately.
+}
+
+// Sample printer for scalars: no-op
+template <typename ResultT, typename PrintItemFn>
+typename std::enable_if<!has_size<ResultT>::value>::type
+printSample(const ResultT&, std::size_t, PrintItemFn) {}
+
+template <typename T>
+inline void doNotOptimize(const T& value) {
+#if defined(__clang__) || defined(__GNUC__)
+    asm volatile("" : : "g"(value) : "memory");
+#else
+    volatile const T* p = &value;
+    (void)p;
+#endif
+}
+
+// Generic benchmark with sampling
+template <typename Fn, typename PrintItemFn>
+auto benchmark(const std::string& label,
+               int runs,
+               Fn fn,
+               std::size_t sampleN,
+               PrintItemFn printItem) -> decltype(fn()) {
+    using namespace std::chrono;
+
+    // 1) Untimed run: correctness + sample
+    auto first = fn();
+    printSample(first, sampleN, printItem);
+
+    // 2) Timed runs: no printing
+    auto start = high_resolution_clock::now();
+    for (int i = 0; i < runs; ++i) {
+        auto r = fn();
+        doNotOptimize(r);
+    }
+    auto end = high_resolution_clock::now();
+
+    double total = duration<double>(end - start).count();
+    printSummary(label, runs, total, first);
+
+    return first;
+}
+
+// Overload: no sample printing
+template <typename Fn>
+auto benchmark(const std::string& label, int runs, Fn fn) -> decltype(fn()) {
+    return benchmark(label, runs, fn, 0, [](const auto&, std::size_t){});
+}
 
 // cleanString — strips surrounding double-quotes if present
 std::string cleanString(const std::string& str) {
@@ -83,9 +199,9 @@ std::vector<ServiceRequest> loadData(const std::string& filename) {
     std::string line;
     std::size_t lineCount = 0;
     std::size_t validRecords = 0;
-    const std::size_t RECORD_LIMIT = 14000000; // 10 Million record limit for testing; adjust as needed
+    const std::size_t RECORD_LIMIT = 14000000; // 14 Million record limit for testing
 
-    // Skip header
+    // Skipping header
     if (std::getline(file, line)) {
         lineCount++;
         std::cout << "Skipped header: " << line.substr(0, 100) << "..." << std::endl;
@@ -94,10 +210,9 @@ std::vector<ServiceRequest> loadData(const std::string& filename) {
     // Read data lines
     while (std::getline(file, line)) {
         lineCount++;
-        if (lineCount % 100000 == 0) {
+        if (lineCount % 1000000 == 0) {
             std::cout << "Processed " << lineCount << " lines, loaded " << validRecords << " records..." << std::endl;
         }
-
         std::vector<std::string> fields = parseCSVLine(line);
         ServiceRequest req;
         if (req.fromFields(fields)) {
@@ -121,10 +236,9 @@ std::vector<ServiceRequest> loadData(const std::string& filename) {
     return records;
 }
 
-// global dataset container
 static std::vector<ServiceRequest> g_records;
 
-// 1. range query on createdDate
+// Query 1 - range query on createdDate
 std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
                                                      const DateTime& end) {
     std::vector<ServiceRequest> out;
@@ -135,7 +249,7 @@ std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
     return out;
 }
 
-// 2. exact match (case-insensitive) on borough
+// Query 2 - exact match (case-insensitive) on borough
 std::vector<ServiceRequest> filterByBorough(const std::string& borough) {
     std::vector<ServiceRequest> out;
     for (const auto& r : g_records) {
@@ -151,7 +265,7 @@ std::vector<ServiceRequest> filterByBorough(const std::string& borough) {
     return out;
 }
 
-// 3. substring search on complaintType (case-insensitive)
+// Query 3 - substring search on complaintType (case-insensitive)
 std::vector<ServiceRequest> searchByComplaint(const std::string& keyword) {
     std::vector<ServiceRequest> out;
     std::string key = keyword;
@@ -166,9 +280,8 @@ std::vector<ServiceRequest> searchByComplaint(const std::string& keyword) {
     return out;
 }
 
-// 4. bounding box on latitude/longitude
+// Query 4 - bounding box on latitude/longitude
 // Returns pointers to the matching records instead of copying full objects.
-// This keeps the memory footprint small even when the result set is large.
 std::vector<const ServiceRequest*> filterByLatLonBox(double minLat, double maxLat,
                                                      double minLon, double maxLon) {
     std::vector<const ServiceRequest*> out;
@@ -182,16 +295,7 @@ std::vector<const ServiceRequest*> filterByLatLonBox(double minLat, double maxLa
     return out;
 }
 
-// 5. sort a copy by createdDate ascending 
-std::vector<ServiceRequest> sortByCreatedDate() {
-    std::vector<ServiceRequest> recs = g_records;  // copy
-    std::sort(recs.begin(), recs.end(), [](const ServiceRequest &a, const ServiceRequest &b) {
-        return a.createdDate < b.createdDate;
-    });
-    return recs;
-}
-
-// 6. compute average latitude of the loaded records - demonstrates an aggregation (reduce) operation.
+// Query 5 - compute average latitude of the loaded records - demonstrates an aggregation (reduce) operation.
 double averageLatitude() {
     if (g_records.empty()) return 0.0;
     double sum = 0.0;
@@ -199,9 +303,7 @@ double averageLatitude() {
     return sum / g_records.size();
 }
 
-// ---------------------------------------------------------------------------
-// 7. Aggregation: Borough totals + top complaint (SERIAL)
-// ---------------------------------------------------------------------------
+// Query 6 - Aggregation: Borough totals + top complaint (SERIAL)
 struct ZoneStats {
     std::size_t totalCount = 0;
     std::map<std::string, std::size_t> byComplaintType;
@@ -224,6 +326,11 @@ std::map<std::string, ZoneStats> aggregateByBorough() {
 
 template<typename MapT>
 void printTopZones(const MapT& zones) {
+    std::size_t totalZones = zones.size();
+    std::size_t index = 0;
+
+    std::cout << "  Results - (" << totalZones << "/" << totalZones << "):\n";
+
     for (const auto& kv : zones) {
         const auto& borough = kv.first;
         const auto& z = kv.second;
@@ -238,18 +345,17 @@ void printTopZones(const MapT& zones) {
             }
         }
 
-        std::cout << borough
+        std::cout << "    [" << index++ << "] "
+                  << "borough=" << borough
                   << " total=" << z.totalCount
-                  << " top_complaint=\"" << topComplaint << "\""
-                  << " (" << topCount << ")"
+                  << " top_complaint=" << topComplaint
+                  << " count=" << topCount
                   << "\n";
     }
 }
 
-// Takes all 20 million records and groups them by zip code, building a summary (total complaints, breakdown by type/agency/status) for each unique zip code found in the dataset.
-
 int main() {
-    const std::string filename = "/Users/Asha/Desktop/Asha workspace/275-mini1/dataset/311_combined.csv";
+    const std::string filename = "/Users/aravindreddy/Downloads/SJSU ClassWork/275 EAD/Mini1_Datasets/311_combined.csv.";
 
     double memBefore = rssMemMB();
     std::cout << "Memory before load: " << memBefore << " MB" << std::endl;
@@ -265,90 +371,88 @@ int main() {
         return 1;
     }
 
-    // print a few sample records for verification
-    std::cout << "\n=== Sample Records ===" << std::endl;
-    for (int i = 0; i < 5 && i < (int)g_records.size(); ++i) {
-        const auto &r = g_records[i];
-        std::cout << "#" << i+1 << ": "
-                  << r.uniqueKey << " | "
-                  << r.createdDate.toString() << " | "
-                  << r.borough << " | "
-                  << r.complaintType << "\n";
-    }
+    std::cout << std::fixed << std::setprecision(6);
 
-    // run each example query to verify functionality and measure performance
-    std::cout << "\n=== Query Outputs ===" << std::endl;
+    std::cout << "\nQuery Outputs - " << std::endl;
 
-    // helper lambdas for timing
-    auto measureVectorQuery = [&](const std::string &label, int runs, auto query) {
-        using namespace std::chrono;
-        std::size_t count = 0;
-        auto startTime = high_resolution_clock::now();
-        for (int i = 0; i < runs; ++i) {
-            auto res = query();           // result must support .size()
-            if (i == 0)
-                count = res.size();
-        }
-        auto endTime = high_resolution_clock::now();
-        double total = duration<double>(endTime - startTime).count();
-        std::cout << label << " -> size=" << count
-                  << ", total=" << total << "s"
-                  << ", avg=" << (total / runs) << "s\n";
-    };
+    const int runs = 20;  // number of runs 
+    const std::size_t sampleN = 5;
 
-    auto measureScalarQuery = [&](const std::string &label, int runs, auto query) {
-        using namespace std::chrono;
-        double val = 0.0;
-        auto startTime = high_resolution_clock::now();
-        for (int i = 0; i < runs; ++i) {
-            val = query();
-        }
-        auto endTime = high_resolution_clock::now();
-        double total = duration<double>(endTime - startTime).count();
-        std::cout << label << " -> value=" << val
-                  << ", total=" << total << "s"
-                  << ", avg=" << (total / runs) << "s\n";
-    };
+    std::cout << "\n[Query 1] Date Range - Filtering service requests created in calendar year 2013.\n"
+          << "This query scans all records and selects those whose createdDate falls within the specified range.\n";
 
-    const int runs = 15;  // number of repetitions for timing
-
-    // date range query
     DateTime start = DateTime::parse("01/01/2013 12:00:00 AM");
     DateTime end   = DateTime::parse("12/31/2013 11:59:59 PM");
-    measureVectorQuery("date range 2013", runs,
-                       [&](){ return filterByCreatedDateRange(start, end); });
+    benchmark("date range 2013", runs,
+    [&](){ return filterByCreatedDateRange(start, end); },
+    sampleN,
+    [&](const ServiceRequest& r, std::size_t i){
+        std::cout << "    [" << i << "] key=" << r.uniqueKey
+                  << " created=" << r.createdDate.toString()   // or however you print DateTime
+                  << " borough=" << r.borough
+                  << "\n";
+    }
+);
 
-    // borough filter
-    measureVectorQuery("borough BROOKLYN", runs,
-                       [&](){ return filterByBorough("BROOKLYN"); });
+    std::cout << "\n[Query 2] Borough filter - Selecting all service requests from borough: BROOKLYN.\n"
+          << "This demonstrates case-insensitive categorical filtering.\n";
 
-    // complaint substring
-    measureVectorQuery("complaint 'rodent'", runs,
-                      [&](){ return searchByComplaint("rodent"); });
+    benchmark("borough BROOKLYN", runs,
+    [&](){ return filterByBorough("BROOKLYN"); },
+    sampleN,
+    [&](const ServiceRequest& r, std::size_t i){
+        std::cout << "    [" << i << "] key=" << r.uniqueKey
+                  << " borough=" << r.borough
+                  << " complaint=" << r.complaintType
+                  << "\n";
+    }
+);
 
-    // sort query 
-    // complaint substring
-    //measureVectorQuery("sorted date", runs,
-         //            [&](){ return sortByCreatedDate(); });
+    std::cout << "\n[Query 3] Complaint search - Searching complaintType for keyword: \"rodent\".\n"
+          << "This performs a case-insensitive substring search across all records.\n";
 
-    // lat/lon box example (rough NYC box)
-   measureVectorQuery("lat/lon box", runs,
-                      [&](){ return filterByLatLonBox(40.5, 40.9, -74.25, -73.7); });
+    benchmark("complaint 'rodent'", runs,
+    [&](){ return searchByComplaint("rodent"); },
+    sampleN,
+    [&](const ServiceRequest& r, std::size_t i){
+        std::cout << "    [" << i << "] key=" << r.uniqueKey
+                  << " complaint=" << r.complaintType
+                  << " borough=" << r.borough
+                  << "\n";
+    }
+);
 
-    // average latitude
-   measureScalarQuery("average latitude", runs, [](){ return averageLatitude(); });
+    std::cout << "\n[Query 4] Latitude/Longitude Filtering - Filtering service requests within NYC geographic bounding box.\n"
+          << "Records must fall within specified latitude and longitude limits.\n";
+    benchmark("lat/lon box", runs,
+    [&](){ return filterByLatLonBox(40.5, 40.9, -74.25, -73.7); },
+    sampleN,
+    [&](const ServiceRequest* r, std::size_t i){
+        if (!r) return;
+        std::cout << "    [" << i << "] key=" << r->uniqueKey
+                  << " lat=" << r->latitude
+                  << " lon=" << r->longitude
+                  << "\n";
+    }
+);
 
-    auto t0 = std::chrono::high_resolution_clock::now();
-    auto result = aggregateByBorough();
-    auto t1 = std::chrono::high_resolution_clock::now();
+    std::cout << "\n[Query 5] Average Latitude - Computing average latitude of all loaded service requests.\n"
+          << "This demonstrates a full-dataset aggregation (reduce operation).\n";
 
-    std::chrono::duration<double> duration = t1 - t0;
+    benchmark("average latitude", runs,
+          [](){ return averageLatitude(); });
 
-    std::cout << "\nBorough aggregation (serial) took "
-              << duration.count() << " seconds\n";
 
+    std::cout << "\n[Query 6] Borough Aggregation - Aggregating records by borough and identifying the most frequent complaint type.\n"
+          << "For each borough: total request count and most common complaint are computed.\n";
+
+    auto agg = benchmark("borough aggregation total+top complaint",
+                     runs,
+                     [](){ return aggregateByBorough(); });
+
+    // Print once after benchmarking
     std::cout << "\n=== Borough Totals + Top Complaint ===\n";
-    printTopZones(result);
+    printTopZones(agg);
 
     return 0;
 }
