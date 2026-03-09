@@ -132,10 +132,6 @@ auto benchmark(const std::string& label, int runs, Fn fn) -> decltype(fn()) {
     return benchmark(label, runs, fn, 0, [](const auto&, std::size_t) {});
 }
 
-// ---------------------------------------------------------------------------
-// CSV parsing / utilities
-// ---------------------------------------------------------------------------
-
 std::string cleanString(const std::string& str) {
     std::string cleaned = str;
     if (!cleaned.empty() && cleaned.front() == '"') cleaned.erase(0, 1);
@@ -192,9 +188,8 @@ static double rssMemMB() {
     return static_cast<double>(info.resident_size) / (1024.0 * 1024.0);
 }
 
-// NOTE: still single-threaded loader (your existing "fallback").
-// Parallel CSV parsing is possible, but keep this as Phase 1/2 baseline.
-std::vector<ServiceRequest> loadDataParallel(const std::string& filename, int /*numberOfThreads*/) {
+// NOTE: still single-threaded loader
+std::vector<ServiceRequest> loadDataParallel(const std::string& filename) {
     constexpr std::size_t MAX_RECORDS = 14000000;
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -244,12 +239,11 @@ std::vector<ServiceRequest> loadDataParallel(const std::string& filename, int /*
 }
 
 std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
-                                                     const DateTime& end,
-                                                     int numberOfThreads) {
-    omp_set_num_threads(numberOfThreads);
+                                                     const DateTime& end) {
+    int T = omp_get_max_threads();
     int n = static_cast<int>(g_records.size());
 
-    std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
+    std::vector<std::vector<ServiceRequest>> localResults(T);
 
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
@@ -260,16 +254,15 @@ std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
     }
 
     std::vector<ServiceRequest> out;
-    for (int t = 0; t < numberOfThreads; ++t)
+    for (int t = 0; t < T; ++t)
         out.insert(out.end(), localResults[t].begin(), localResults[t].end());
     return out;
 }
 
-std::vector<ServiceRequest> filterByBorough(const std::string& borough,
-                                            int numberOfThreads) {
-    omp_set_num_threads(numberOfThreads);
+std::vector<ServiceRequest> filterByBorough(const std::string& borough) {
+    int T = omp_get_max_threads();
     int n = static_cast<int>(g_records.size());
-    std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
+    std::vector<std::vector<ServiceRequest>> localResults(T);
 
     std::string target = borough;
     for (auto& c : target) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
@@ -285,16 +278,15 @@ std::vector<ServiceRequest> filterByBorough(const std::string& borough,
     }
 
     std::vector<ServiceRequest> out;
-    for (int t = 0; t < numberOfThreads; ++t)
+    for (int t = 0; t < T; ++t)
         out.insert(out.end(), localResults[t].begin(), localResults[t].end());
     return out;
 }
 
-std::vector<ServiceRequest> searchByComplaint(const std::string& keyword,
-                                              int numberOfThreads) {
-    omp_set_num_threads(numberOfThreads);
+std::vector<ServiceRequest> searchByComplaint(const std::string& keyword) {
+    int T = omp_get_max_threads();
     int n = static_cast<int>(g_records.size());
-    std::vector<std::vector<ServiceRequest>> localResults(numberOfThreads);
+    std::vector<std::vector<ServiceRequest>> localResults(T);
 
     std::string key = keyword;
     for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -310,17 +302,16 @@ std::vector<ServiceRequest> searchByComplaint(const std::string& keyword,
     }
 
     std::vector<ServiceRequest> out;
-    for (int t = 0; t < numberOfThreads; ++t)
+    for (int t = 0; t < T; ++t)
         out.insert(out.end(), localResults[t].begin(), localResults[t].end());
     return out;
 }
 
 std::vector<const ServiceRequest*> filterByLatLonBox(double minLat, double maxLat,
-                                                     double minLon, double maxLon,
-                                                     int numberOfThreads) {
-    omp_set_num_threads(numberOfThreads);
+                                                     double minLon, double maxLon) {
+    int T = omp_get_max_threads();
     int n = static_cast<int>(g_records.size());
-    std::vector<std::vector<const ServiceRequest*>> localResults(numberOfThreads);
+    std::vector<std::vector<const ServiceRequest*>> localResults(T);
 
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n; ++i) {
@@ -332,14 +323,13 @@ std::vector<const ServiceRequest*> filterByLatLonBox(double minLat, double maxLa
     }
 
     std::vector<const ServiceRequest*> out;
-    for (int t = 0; t < numberOfThreads; ++t)
+    for (int t = 0; t < T; ++t)
         out.insert(out.end(), localResults[t].begin(), localResults[t].end());
     return out;
 }
 
-double averageLatitude(int numberOfThreads) {
+double averageLatitude() {
     if (g_records.empty()) return 0.0;
-    omp_set_num_threads(numberOfThreads);
     int n = static_cast<int>(g_records.size());
     double sum = 0.0;
 
@@ -389,9 +379,8 @@ static void mergeZoneStats(ZoneStats& dst, const ZoneStats& src) {
 }
 
 // Faster scaling version: thread-local unordered_map, then merge
-std::map<std::string, ZoneStats> aggregateByBorough_omp_fast(int numberOfThreads) {
-    omp_set_num_threads(numberOfThreads);
-    int T = numberOfThreads;
+std::map<std::string, ZoneStats> aggregateByBorough_omp_fast() {
+    int T = omp_get_max_threads();
     std::vector<std::unordered_map<std::string, ZoneStats>> local(static_cast<std::size_t>(T));
 
     #pragma omp parallel
@@ -453,28 +442,15 @@ void printTopZones(const MapT& zones) {
 
 int main(int argc, char* argv[]) { 
     std::string filename =
-        "/Users/aravindreddy/Downloads/SJSU ClassWork/275 EAD/Mini1_Datasets/311_combined.csv.";
+        (argc > 1) ? argv[1]
+                   : "/Users/aravindreddy/Downloads/SJSU ClassWork/275 EAD/Mini1_Datasets/311_combined.csv.";
 
-    int numberOfThreads = 10;
-
-    if (argc > 1 && std::string(argv[1]).length() > 0) {
-        filename = argv[1];
-    }
-    if (argc > 2) {
-        numberOfThreads = std::atoi(argv[2]);
-    } else {
-        const char* env_threads = std::getenv("OMP_THREAD_COUNT");
-        if (env_threads) numberOfThreads = std::atoi(env_threads);
-    }
-    if (numberOfThreads <= 0)
-        numberOfThreads = static_cast<int>(std::thread::hardware_concurrency());
-
-    std::cout << "Thread count: " << numberOfThreads << "\n";
+    std::cout << "Using threads (OpenMP): " << omp_get_max_threads() << "\n";
 
     double memBefore = rssMemMB();
     std::cout << "Memory before load: " << memBefore << " MB\n";
 
-    g_records = loadDataParallel(filename, numberOfThreads);
+    g_records = loadDataParallel(filename);
 
     double memAfter = rssMemMB();
     std::cout << "Memory after load: " << memAfter << " MB\n";
@@ -500,7 +476,7 @@ int main(int argc, char* argv[]) {
     DateTime end   = DateTime::parse("12/31/2013 11:59:59 PM");
 
     benchmark("date range 2013", runs,
-        [&](){ return filterByCreatedDateRange(start, end, numberOfThreads); },
+        [&](){ return filterByCreatedDateRange(start, end); },
         sampleN,
         [&](const ServiceRequest& r, std::size_t i){
             std::cout << "    [" << i << "] key=" << r.uniqueKey
@@ -515,7 +491,7 @@ int main(int argc, char* argv[]) {
               << "This demonstrates case-insensitive categorical filtering.\n";
 
     benchmark("borough BROOKLYN", runs,
-        [&](){ return filterByBorough("BROOKLYN", numberOfThreads); },
+        [&](){ return filterByBorough("BROOKLYN"); },
         sampleN,
         [&](const ServiceRequest& r, std::size_t i){
             std::cout << "    [" << i << "] key=" << r.uniqueKey
@@ -530,7 +506,7 @@ int main(int argc, char* argv[]) {
               << "This performs a case-insensitive substring search across all records.\n";
 
     benchmark("complaint 'rodent'", runs,
-        [&](){ return searchByComplaint("rodent", numberOfThreads); },
+        [&](){ return searchByComplaint("rodent"); },
         sampleN,
         [&](const ServiceRequest& r, std::size_t i){
             std::cout << "    [" << i << "] key=" << r.uniqueKey
@@ -545,7 +521,7 @@ int main(int argc, char* argv[]) {
               << "Records must fall within specified latitude and longitude limits.\n";
 
     benchmark("lat/lon box", runs,
-        [&](){ return filterByLatLonBox(40.5, 40.9, -74.25, -73.7, numberOfThreads); },
+        [&](){ return filterByLatLonBox(40.5, 40.9, -74.25, -73.7); },
         sampleN,
         [&](const ServiceRequest* r, std::size_t i){
             if (!r) return;
@@ -561,23 +537,22 @@ int main(int argc, char* argv[]) {
               << "This demonstrates a full-dataset aggregation (reduce operation) using OpenMP reduction.\n";
 
     benchmark("average latitude", runs,
-        [&](){ return averageLatitude(numberOfThreads); }
+        [&](){ return averageLatitude(); }
     );
 
     // Query 6
     std::cout << "\n[Query 6] Borough Aggregation - Aggregating records by borough and identifying the most frequent complaint type.\n"
               << "For each borough: total request count and most common complaint are computed.\n";
 
-    // Optional warm-up (OpenMP thread pool / first-touch effects)
-    (void)aggregateByBorough_omp_fast(numberOfThreads);
+    // warm-up
+    (void)aggregateByBorough_omp_fast();
 
     auto agg_fast = benchmark("borough aggregation (omp fast)", runs,
-        [&](){ return aggregateByBorough_omp_fast(numberOfThreads); }
+        [&](){ return aggregateByBorough_omp_fast(); }
     );
 
     std::cout << "\n Borough Totals + Top Complaint -\n";
     printTopZones(agg_fast);
-
 
     return 0;
 }
