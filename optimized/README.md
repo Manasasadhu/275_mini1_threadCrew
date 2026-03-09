@@ -1,5 +1,4 @@
-# OaA (Object-of-Arrays) NYC 311 Analysis
-
+# Optimized C++ Implementation
 This folder contains a high-performance, parallel C++ implementation for analyzing the NYC 311 Service Requests dataset using an **Object-of-Arrays (OoA)** memory layout. This approach is designed to maximize cache efficiency, enable vectorized operations, and accelerate parallel queries on large datasets.
 
 ## What is Object-of-Arrays (OoA)?
@@ -93,12 +92,4 @@ Each query is implemented to take advantage of the OoA layout and OpenMP paralle
    - `csv_file` (optional): Path to the NYC 311 CSV file (default is hardcoded in main.cpp)
    - `num_threads` (optional): Number of threads to use (default: hardware concurrency)
 
-3. **Experiment:**  
-   - Add or modify queries in `queries.cpp` and `main.cpp`
-   - Use the benchmarking harness to compare performance with AoS or single-threaded versions
 
-## Notes
-
-- This folder is self-contained and does not affect the main project build.
-- Designed for high performance, clarity, and experimentation.
-- The OoA approach is ideal for analytical workloads and large-scale data processing.
