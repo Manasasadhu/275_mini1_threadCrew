@@ -1,98 +1,210 @@
 # multi_thread
 
-This folder contains a multi-threaded C++ implementation and benchmarking harness for analyzing the NYC 311 Service Requests dataset. It leverages OpenMP for parallelism to accelerate data processing and query execution on multi-core systems.
+This folder contains a **multi-threaded C++ implementation** and benchmarking harness for analyzing the **NYC 311 Service Requests dataset**.
 
-## Folder Contents
+It leverages **OpenMP** to enable parallel data processing and accelerate query execution on multi-core systems.
 
-- **main.cpp**  
-  The main entry point. Implements:
-  - Data loading from CSV (with memory usage reporting)
-  - Core query functions (see below for details)
-  - Unified benchmarking and timing logic for all queries
-  - Sample output and result summaries for each query
-  - Utility templates for generic benchmarking and sample printing
-  - OpenMP-based parallelism for high performance
+---
 
-- **ServiceRequest.h / ServiceRequest.cpp**  
-  Defines the core data structures and parsing logic:
-  - `DateTime`: Compact, efficient date/time representation with parsing and comparison
-  - `ServiceRequest`: Struct modeling a single NYC 311 record, with all relevant fields
-  - Parsing helpers for robust CSV field conversion
-  - `fromFields`: Populates a `ServiceRequest` from a vector of CSV strings
+# 📁 Folder Structure
 
-- **build/**  
-  (Optional) Directory for build artifacts or out-of-source builds.
+## `main.cpp`
 
-- **README.md**  
-  This file. Explains the folder structure and usage.
+The main entry point of the program. It includes:
 
-## Query Functions (main.cpp)
+* CSV data loading (with memory usage reporting)
+* Core query implementations
+* Unified benchmarking and timing logic
+* Sample result output and summaries
+* Utility templates for generic benchmarking and printing
+* OpenMP-based parallel execution
 
-Each query operates on the loaded NYC 311 dataset and demonstrates a different type of data access or aggregation, with OpenMP-based parallelism where applicable:
+---
 
-1. **Date Range Query**
-   - `filterByCreatedDateRange(start, end, numberOfThreads)`
-   - Returns all service requests created between two DateTime values (inclusive).
-   - **Parallelism:** The dataset is divided among threads, each thread filters its chunk, and results are combined at the end. This accelerates range filtering on large datasets.
+## `ServiceRequest.h` / `ServiceRequest.cpp`
 
-2. **Borough Filter**
-   - `filterByBorough(borough, numberOfThreads)`
-   - Returns all requests matching a given borough (case-insensitive).
-   - **Parallelism:** Each thread processes a chunk of the data, performing case-insensitive comparison, and results are merged. This speeds up categorical filtering.
+Defines the core data model and parsing utilities:
 
-3. **Complaint Substring Search**
-   - `searchByComplaint(keyword, numberOfThreads)`
-   - Returns all requests whose complaint type contains the given substring (case-insensitive).
-   - **Parallelism:** Threads search their assigned data chunks for the substring, and results are merged. This enables fast text search across millions of records.
+* `DateTime`
 
-4. **Latitude/Longitude Bounding Box**
-   - `filterByLatLonBox(minLat, maxLat, minLon, maxLon, numberOfThreads)`
-   - Returns pointers to all requests within a specified geographic bounding box.
-   - **Parallelism:** Each thread checks its chunk for spatial inclusion, storing pointers to matching records. Results are merged for efficiency.
+  * Compact and efficient date/time representation
+  * Parsing and comparison support
 
-5. **Average Latitude**
-   - `averageLatitude(numberOfThreads)`
-   - Computes the average latitude of all loaded records.
-   - **Parallelism:** Uses OpenMP reduction to sum latitudes in parallel, then divides by total count. This is a classic parallel reduction pattern.
+* `ServiceRequest`
 
-6. **Borough Aggregation + Top Complaint (OMP Fast)**
-   - `aggregateByBorough_omp_fast()`
-   - Groups requests by borough, counts total requests per borough, and finds the most common complaint type in each borough.
-   - **Parallelism:** Each thread builds its own local aggregation map, then all maps are merged in a final step. This avoids contention and is highly scalable for grouping and aggregation tasks.
+  * Represents a single NYC 311 record
+  * Contains all relevant fields
 
-## Benchmarking and Output
+* CSV parsing helpers
 
-- All queries are benchmarked using a unified timing function that prints:
-  - Query label
-  - Result size or value
-  - Total and average execution time
-  - A sample of the result (where applicable)
+* `fromFields()` function to populate a `ServiceRequest` from parsed CSV fields
 
-- Utility templates detect container types and enable generic printing/benchmarking for vectors, maps, and scalars.
+---
 
-## How to Use
+## `build/`
 
-1. **Build:**  
-   Compile with a C++17 compiler and OpenMP support:
-   ```
-   g++ -std=c++17 -fopenmp -O2 -o main main.cpp ServiceRequest.cpp
-   ```
+(Optional) Directory for build artifacts or out-of-source builds.
 
-2. **Run:**  
-   ```
-   ./main [csv_file] [num_threads]
-   ```
-   - `csv_file` (optional): Path to the NYC 311 CSV file (default is hardcoded in main.cpp)
-   - `num_threads` (optional): Number of threads to use (default: hardware concurrency or OMP_THREAD_COUNT env variable)
+---
 
-3. **Experiment:**  
-   - Add or modify queries in `main.cpp`
-   - Try new data structures or optimizations
-   - Use the benchmarking harness to compare performance
+## `README.md`
 
-## Notes
+Project documentation (this file).
 
-- This folder is self-contained and does not affect the main project build.
-- Designed for clarity, performance, and experimentation—feel free to add new files or try alternative designs.
-- OpenMP is used for parallelism; you can tune thread count for your hardware.
-- The benchmarking harness and sample output logic are type-safe and generic, making it easy to add new queries or result types.
+---
+
+# 🔎 Query Functions (main.cpp)
+
+Each query operates on the loaded dataset and demonstrates a different type of filtering or aggregation using **OpenMP parallelism**.
+
+---
+
+## 1️⃣ Date Range Query
+
+```cpp
+filterByCreatedDateRange(start, end, numberOfThreads)
+```
+
+* Returns all service requests created between two `DateTime` values (inclusive).
+* **Parallel Strategy:**
+  The dataset is divided into chunks. Each thread filters its portion independently, and results are merged at the end.
+* Efficient for large-scale range filtering.
+
+---
+
+## 2️⃣ Borough Filter
+
+```cpp
+filterByBorough(borough, numberOfThreads)
+```
+
+* Returns all requests matching a given borough (case-insensitive).
+* **Parallel Strategy:**
+  Threads process chunks independently and merge results.
+* Optimized for categorical filtering.
+
+---
+
+## 3️⃣ Complaint Substring Search
+
+```cpp
+searchByComplaint(keyword, numberOfThreads)
+```
+
+* Returns all requests whose complaint type contains the given substring (case-insensitive).
+* **Parallel Strategy:**
+  Each thread performs substring search on its assigned data chunk.
+* Enables fast large-scale text searching.
+
+---
+
+## 4️⃣ Latitude/Longitude Bounding Box
+
+```cpp
+filterByLatLonBox(minLat, maxLat, minLon, maxLon, numberOfThreads)
+```
+
+* Returns pointers to all requests within a specified geographic bounding box.
+* **Parallel Strategy:**
+  Threads independently check spatial inclusion and merge matching results.
+* Efficient for spatial filtering.
+
+---
+
+## 5️⃣ Average Latitude
+
+```cpp
+averageLatitude(numberOfThreads)
+```
+
+* Computes the average latitude of all records.
+* **Parallel Strategy:**
+  Uses OpenMP reduction to sum latitudes in parallel.
+* Demonstrates classic parallel reduction.
+
+---
+
+## 6️⃣ Borough Aggregation + Top Complaint (OMP Fast)
+
+```cpp
+aggregateByBorough_omp_fast()
+```
+
+* Groups requests by borough
+* Counts total requests per borough
+* Determines the most common complaint type per borough
+
+**Parallel Strategy:**
+
+* Each thread builds its own local aggregation map
+* Local maps are merged at the end
+* Minimizes contention and improves scalability
+
+---
+
+# ⏱ Benchmarking & Output
+
+All queries use a unified benchmarking function that reports:
+
+* Query label
+* Result size or computed value
+* Total execution time
+* Average execution time
+* Sample results (when applicable)
+
+Utility templates automatically detect container types (vectors, maps, scalars) to support generic printing and benchmarking.
+
+---
+
+# 🚀 How to Use
+
+## 1️⃣ Build
+
+Compile using a C++17 compiler with OpenMP support:
+
+```bash
+g++ -std=c++17 -fopenmp -O2 -o main main.cpp ServiceRequest.cpp
+```
+
+---
+
+## 2️⃣ Run
+
+```bash
+./main [csv_file] [num_threads]
+```
+
+### Arguments:
+
+* `csv_file` (optional)
+  Path to the NYC 311 CSV file
+  (Default path may be hardcoded in `main.cpp`)
+
+* `num_threads` (optional)
+  Number of threads to use
+  (Default: hardware concurrency or `OMP_NUM_THREADS` environment variable)
+
+---
+
+## 3️⃣ Experiment
+
+You can:
+
+* Add new queries in `main.cpp`
+* Modify existing data structures
+* Experiment with different OpenMP strategies
+* Compare performance using the built-in benchmarking harness
+
+---
+
+# 📝 Notes
+
+* This folder is self-contained and does not affect the main project build.
+* Designed for clarity, performance, and experimentation.
+* OpenMP is used for parallelism; tune thread count according to your hardware.
+* The benchmarking system is generic and type-safe, making it easy to extend with new query types.
+
+---
+
+**Purpose:**
+This implementation demonstrates how multi-threading can significantly accelerate large-scale data processing and analytical queries in C++.
