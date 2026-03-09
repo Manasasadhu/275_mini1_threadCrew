@@ -1,11 +1,4 @@
-// main.cpp (multi-threaded / OpenMP version, refactored to use the same benchmark helper)
-// Build (example):
-//   g++ -std=c++17 -O2 -fopenmp -o build main.cpp ServiceRequest.cpp
-// Or clang (Homebrew llvm typically required for OpenMP on mac):
-//   clang++ -std=c++17 -O2 -fopenmp -o build main.cpp ServiceRequest.cpp -L$(brew --prefix libomp)/lib -I$(brew --prefix libomp)/include
-
 #include "ServiceRequest.h"
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -20,15 +13,10 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
-
 #include <omp.h>
 #include <mach/mach.h>
 
 static std::vector<ServiceRequest> g_records;
-
-// ---------------------------------------------------------------------------
-// Benchmark helpers (same idea as your single_thread version)
-// ---------------------------------------------------------------------------
 
 // Detect if type has .size()
 template <typename T>
@@ -255,10 +243,6 @@ std::vector<ServiceRequest> loadDataParallel(const std::string& filename, int /*
     return records;
 }
 
-// ---------------------------------------------------------------------------
-// Parallel query functions (OpenMP)
-// ---------------------------------------------------------------------------
-
 std::vector<ServiceRequest> filterByCreatedDateRange(const DateTime& start,
                                                      const DateTime& end,
                                                      int numberOfThreads) {
@@ -367,10 +351,6 @@ double averageLatitude(int numberOfThreads) {
     return sum / static_cast<double>(g_records.size());
 }
 
-// ---------------------------------------------------------------------------
-// Aggregation (two versions: omp critical vs thread-local fast)
-// ---------------------------------------------------------------------------
-
 struct ZoneStats {
     std::size_t totalCount = 0;
     std::map<std::string, std::size_t> byComplaintType;
@@ -471,12 +451,7 @@ void printTopZones(const MapT& zones) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
-
 int main(int argc, char* argv[]) { 
-    // NOTE: removed trailing '.' from filename; pass as argv[1] ideally.
     std::string filename =
         "/Users/aravindreddy/Downloads/SJSU ClassWork/275 EAD/Mini1_Datasets/311_combined.csv.";
 
@@ -600,17 +575,9 @@ int main(int argc, char* argv[]) {
         [&](){ return aggregateByBorough_omp_fast(numberOfThreads); }
     );
 
-    std::cout << "\n=== Borough Totals + Top Complaint ===\n";
+    std::cout << "\n Borough Totals + Top Complaint -\n";
     printTopZones(agg_fast);
 
-    // If you want to also show why critical is bad (great for your report), uncomment:
-    /*
-    auto agg_crit = benchmark("borough aggregation (omp critical)", runs,
-        [&](){ return aggregateByBorough_omp_critical(); }
-    );
-    std::cout << "\n=== Borough Totals + Top Complaint (critical) ===\n";
-    printTopZones(agg_crit);
-    */
 
     return 0;
 }
