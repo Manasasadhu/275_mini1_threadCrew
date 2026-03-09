@@ -36,24 +36,13 @@ Additional components:
 
 ---
 
-## build/
-
-(Optional) Directory for build artifacts or out-of-source builds.
-
----
-
-## mainc.cpp
+## main.cpp
 
 (Optional/experimental)
 May contain alternative or experimental code not wired into the main build.
 
 ---
 
-## README.md
-
-Project documentation (this file).
-
----
 
 # Query Functions (main.cpp)
 
