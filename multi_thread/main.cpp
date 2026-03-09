@@ -457,18 +457,10 @@ int main(int argc, char* argv[]) {
 
     int numberOfThreads = 10;
 
-    if (argc > 1 && std::string(argv[1]).length() > 0) {
-        filename = argv[1];
-    }
     if (argc > 2) {
         numberOfThreads = std::atoi(argv[2]);
-    } else {
-        const char* env_threads = std::getenv("OMP_THREAD_COUNT");
-        if (env_threads) numberOfThreads = std::atoi(env_threads);
-    }
-    if (numberOfThreads <= 0)
-        numberOfThreads = static_cast<int>(std::thread::hardware_concurrency());
-
+        omp_set_num_threads(numberOfThreads);
+    } 
     std::cout << "Thread count: " << numberOfThreads << "\n";
 
     double memBefore = rssMemMB();
