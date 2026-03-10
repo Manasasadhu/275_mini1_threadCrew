@@ -1,7 +1,7 @@
 # Build output
 ./single_thread/build/
-./multi_thread/main/
-./optimized/main/
+./multi_thread/build/
+./optimized/build/
 *.o
 *.a
 *.out
