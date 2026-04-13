@@ -282,6 +282,121 @@ Load & Read 14M records       & 46.3975 & 48.2298 & 45.7420 \\
     adds coordination overhead without reducing disk read time.
 \end{itemize}
 
+\subsection{How Result Size Drives Multi-Thread Performance}
+
+The multi-thread timings reveal a strong correlation between the number of
+matching records and the effectiveness of parallelism. The table below
+reorders the queries by result size to make the pattern visible:
+
+\vspace{0.5em}
+\begin{center}
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{0.95\textwidth}{c X r c c}
+\toprule
+\textbf{\#} & \textbf{Query} & \textbf{Matches} &
+\makecell{\textbf{Single}\\\textbf{Avg (s)}} &
+\makecell{\textbf{Multi 6t}\\\textbf{Speedup}} \\
+\midrule
+5 & Average latitude        & 1 (scalar)   & 2.84 & $-$8.1\%  \\
+3 & Complaint keyword       & 165,106      & 4.88 & $+$19.7\% \\
+1 & Date range filter       & 484,799      & 3.29 & $+$2.9\%  \\
+2 & Borough filter          & 4,002,729    & 87.03 & $-$3.7\% \\
+4 & Lat/Lon bounding box    & 12,673,163   & 3.36 & $+$14.1\% \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\vspace{0.5em}
+\noindent
+The critical factor is not the number of matches alone, but the
+\emph{cost per match} in the output path:
+
+\begin{itemize}
+  \item \textbf{Queries 1--3 return full \texttt{ServiceRequest} copies.}
+    Each copy allocates heap memory for $\sim$20 \texttt{std::string} fields.
+    When the match count is small (Q3: 165K), the total allocation volume is
+    manageable and parallel scan time dominates, yielding a net speedup.
+    When the match count is large (Q2: 4M), threads spend more time contending
+    on the memory allocator than doing useful comparison work. The allocator
+    (\texttt{malloc}/\texttt{free}) uses internal locks or per-thread arenas;
+    at 6 threads each performing millions of heap allocations, contention
+    serializes the output path and erases the parallel gain.
+
+  \item \textbf{Query 4 returns pointers (\texttt{const ServiceRequest*}).}
+    Despite matching 12.6 million records --- the largest result set --- it is
+    14.1\% \emph{faster} with 6 threads. Each match writes a single 8-byte
+    pointer with no heap allocation, so the output cost per match is
+    negligible. This confirms that the bottleneck in Q2 is not the scan but
+    the copy-and-allocate step.
+
+  \item \textbf{Query 5 produces a single scalar.}
+    There is no output vector at all, yet it is 8.1\% slower at 6 threads.
+    The per-record work (one floating-point addition) is so cheap that OpenMP
+    thread-management overhead --- barrier synchronization, reduction merging,
+    and thread wake-up latency --- exceeds the computation being parallelized.
+\end{itemize}
+
+\noindent
+The general rule: parallelism helps when per-record \emph{compute} cost is
+high relative to per-match \emph{output} cost. When output cost dominates
+(large result sets of heap-heavy structs), adding threads makes things worse.
+
+\subsection{Why Performance Decreases at 6 Threads}
+
+Several queries show worse performance at 6 threads than at 2 threads
+(Q2, Q3, Q5, Q6 in the multi-thread table). Multiple factors compound at
+higher thread counts:
+
+\begin{enumerate}
+  \item \textbf{Memory allocator contention.}
+    The system allocator (\texttt{libmalloc} on macOS) uses a limited number
+    of internal arenas protected by locks. At 2 threads, contention is rare.
+    At 6 threads each performing millions of \texttt{std::string} copies via
+    \texttt{push\_back}, threads frequently block waiting for an arena lock.
+    This serializes the output path and can make 6 threads slower than 2.
+
+  \item \textbf{Memory bandwidth saturation.}
+    Each \texttt{ServiceRequest} struct is $\sim$400 bytes. Scanning 14M
+    records at 6 threads pulls $\sim$5.6~GB through the memory bus. Consumer
+    machines typically saturate DRAM bandwidth at 3--4 active cores on a
+    memory-bound workload. Beyond that point, additional threads compete for
+    the same bandwidth without increasing throughput.
+
+  \item \textbf{L2/L3 cache pressure.}
+    Six threads writing to six separate \texttt{localResults} vectors means
+    six distinct memory regions being actively grown via \texttt{push\_back}.
+    Each reallocation invalidates cache lines. With a shared L3 cache, threads
+    evict each other's working sets, increasing cache miss rates compared to
+    fewer threads.
+
+  \item \textbf{False sharing on vector metadata.}
+    The \texttt{std::vector<std::vector<ServiceRequest>>~localResults(T)}
+    stores $T$ vector objects contiguously. Each vector's internal metadata
+    (\texttt{size}, \texttt{capacity}, \texttt{data} pointer) is $\sim$24
+    bytes. At $T=6$, adjacent vectors' metadata may share a 64-byte cache
+    line. When one thread updates its vector's \texttt{size}, the hardware
+    invalidates the cache line for all other threads --- even though they
+    access different vectors. This false sharing penalty grows with thread
+    count.
+
+  \item \textbf{OpenMP overhead exceeds per-record work (Query 5).}
+    For the average-latitude reduction, each iteration performs a single
+    \texttt{double} addition ($\sim$1~ns). OpenMP's thread barrier, reduction
+    merge, and scheduling overhead is fixed per parallel region ($\sim$1--5~$\mu$s).
+    With 14M records split across 6 threads, the per-thread chunk is
+    $\sim$2.3M iterations --- fast enough that the fixed overhead becomes a
+    measurable fraction of total runtime. At 2 threads the overhead is paid
+    once for a larger chunk; at 6 threads it is paid once for a smaller chunk
+    but the overhead-to-work ratio is worse.
+\end{enumerate}
+
+\noindent
+The 10-thread column shows partial recovery for some queries (Q2 drops from
+90.2~s to 72.5~s) because the increased parallelism in the \emph{scan} phase
+finally outweighs the contention in the \emph{output} phase --- but only
+because the scan work is now split finely enough to offset the overhead.
+
 % ============================================================
 \section{Optimized Approach}
 \label{sec:opt}
@@ -419,6 +534,73 @@ and the contiguous layout lets the compiler auto-vectorize the loop.
     array (write 1/0 in parallel, gather indices single-threaded) eliminates
     all concurrent \texttt{push\_back} contention.
 \end{itemize}
+
+\subsection{The \texttt{keep[]} Mark-and-Gather Pattern}
+
+The optimized filter queries (Q1, Q2) replace the multi-thread pattern of
+thread-local result vectors with a two-phase \texttt{keep[]} marker array.
+This design choice is central to the optimized implementation's performance
+and warrants detailed explanation.
+
+\begin{lstlisting}[language=C++]
+// Phase 1: parallel mark (zero contention)
+std::vector<unsigned char> keep(n, 0);
+#pragma omp parallel for schedule(static)
+for (std::size_t i = 0; i < n; ++i) {
+    if (condition) keep[i] = 1;
+}
+
+// Phase 2: serial gather (single allocation, deterministic order)
+std::vector<std::size_t> out;
+out.reserve(n / 10 + 1);
+for (std::size_t i = 0; i < n; ++i) {
+    if (keep[i]) out.push_back(i);
+}
+\end{lstlisting}
+
+\noindent\textbf{Why this is faster than thread-local vectors:}
+
+\begin{enumerate}
+  \item \textbf{Zero contention in the parallel phase.}
+    Each thread writes to its own index in \texttt{keep[]} --- there is no
+    shared data structure, no lock, and no \texttt{push\_back} that could
+    trigger a reallocation. Each write is a single byte (1 or 0) with no
+    heap allocation. By contrast, the multi-thread pattern's
+    \texttt{localResults[tid].push\_back(record)} copies an entire
+    \texttt{ServiceRequest} struct per match, triggering heap allocations
+    for every \texttt{std::string} field.
+
+  \item \textbf{No merge step.}
+    The multi-thread pattern requires a post-parallel merge loop that
+    concatenates $T$ thread-local vectors into one output vector. For Q2
+    (4M matches), this merge copies millions of records and is itself a
+    significant cost. The \texttt{keep[]} pattern eliminates this entirely:
+    the serial gather reads a flat byte array and appends 8-byte indices.
+
+  \item \textbf{Cache-friendly access.}
+    \texttt{keep[]} is a contiguous \texttt{unsigned char} array accessed in
+    sequential order --- the same order as the data columns being scanned.
+    The CPU hardware prefetcher handles this pattern optimally. The
+    multi-thread pattern's thread-local vectors are scattered across the heap
+    and grow unpredictably, defeating prefetch.
+
+  \item \textbf{Indices instead of structs.}
+    The gather phase pushes \texttt{std::size\_t} indices (8 bytes each)
+    rather than full \texttt{ServiceRequest} structs ($\sim$400 bytes) or
+    even pointers. Downstream code accesses the original OoA columns by
+    index, so no data is copied at query time.
+
+  \item \textbf{Deterministic output order.}
+    Thread-local vectors produce results in an order that depends on thread
+    scheduling. The \texttt{keep[]} pattern preserves the original data order,
+    which simplifies validation and debugging.
+\end{enumerate}
+
+\noindent\textbf{Cost:}
+The marker array allocates $n$ bytes upfront ($\sim$14~MB for 14M records).
+This is trivial compared to the hundreds of megabytes saved by not copying
+structs, and the allocation is a single contiguous block that the OS can
+satisfy from a pre-mapped page pool without contention.
 
 % ============================================================
 \section{Failed Approaches and Lessons Learned}
