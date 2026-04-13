@@ -14,6 +14,8 @@
 - [`single_thread/`](single_thread/README.md): Baseline serial implementation. Loads and queries the dataset using a single thread. All queries and benchmarking logic are implemented here.
 - [`multi_thread/`](multi_thread/README.md): Adds OpenMP-based parallelism to all queries and data loading. Thread count is configurable. Highlights both the benefits and pitfalls of naive parallelization.
 - [`optimized/`](optimized/README.md): Implements advanced optimizations, including an Object-of-Arrays (OoA) memory layout, pointer-based result sets, and precomputed fields. Achieves the best performance by addressing memory and cache bottlenecks.
+- [`pthread/`](pthread/README.md): Early prototype replacing OpenMP with raw POSIX threads (`pthread_create`/`pthread_join`). Demonstrates manual thread management and work partitioning. Runtimes were indistinguishable from OpenMP; abandoned for readability.
+- [`simd/`](simd/README.md): Manual AVX2 SIMD intrinsics for Query 4 (lat/lon bounding box) and Query 5 (average latitude). Uses `__m256d` registers to process 4 doubles per instruction. Compiler auto-vectorization under `-O3` recovered most of the benefit once OoA layout was adopted.
 
 Each folder contains its own `README.md` with detailed explanations, build/run instructions, and query logic.
 
